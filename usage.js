@@ -72,6 +72,37 @@ var backoff = {
     },
 };
 
+/* ~/.claude.json and ~/.claude/.credentials.json are written separately, so a
+ * login can present a new email alongside a token that has not been written
+ * yet. Worst case three extra requests, only ever on a switch. */
+var SWITCH_RETRY_DELAYS_MS = [2000, 5000, 10000];
+
+/* How long to wait before retrying a post-switch fetch, or null to stop.
+ *
+ * A 401 in the write-race window is not an expired token, and a missing
+ * credentials file is not a signed-out user — both are a file that has not
+ * landed yet, and reporting either as a fault right after a successful login
+ * is worse than saying nothing.
+ *
+ * `identity` is the account the switch moved *to*. When it is null the user
+ * genuinely signed out: there is no token by definition, so "not signed in" is
+ * the truth and must be shown immediately rather than retried.
+ *
+ * Lives here rather than in indicator.js so the harness can cover exhaustion
+ * and the non-retryable errors — indicator.js needs St and a running Shell. */
+var switchRetryDelayMs = function (error, attempt, identity) {
+    if (identity === null || identity === undefined)
+        return null;
+    if (error !== Err.EXPIRED && error !== Err.NO_AUTH)
+        return null;
+    if (!Number.isInteger(attempt) || attempt < 0)
+        return null;
+    if (attempt >= SWITCH_RETRY_DELAYS_MS.length)
+        return null;
+
+    return SWITCH_RETRY_DELAYS_MS[attempt];
+};
+
 /* ------------------------------------------------------------------ *
  * Pure helpers
  * ------------------------------------------------------------------ */

@@ -22,13 +22,6 @@ const AGE_TICK_SECONDS = 15;
  * entry in ERROR_TEXT: it is a transient state, not a fault. */
 const SWITCH_STATUS = 'Loading usage for the new account…';
 
-/* ~/.claude.json and ~/.claude/.credentials.json are written separately, so a
- * switch can present a new email alongside the old token. Firing once would
- * report "Token expired" immediately after a successful login. Worst case is
- * three extra requests, only ever on a switch — a ladder rather than a second
- * file watcher because it self-corrects whichever file lands first. */
-const SWITCH_RETRY_DELAYS_MS = [2000, 5000, 10000];
-
 const ERROR_TEXT = {
     'no-auth': 'Not signed in — use Switch Account to sign in',
     'expired': 'Token expired — sign in again to refresh it',
@@ -258,6 +251,13 @@ class ClaudeMonitorIndicator extends PanelMenu.Button {
      * longer needs to be reported here as if it were a fault — serving the
      * cache is the normal path, not a degraded one. */
     _statusText(result) {
+        /* While a post-switch retry is pending, the ladder owns this row. The
+         * error it is retrying is not the truth yet, and an ordinary refresh
+         * landing mid-ladder must not replace "Loading…" with a fault message
+         * the user would act on right after a successful login. */
+        if (this._switchRetryId)
+            return SWITCH_STATUS;
+
         if (!result.error || !ERROR_TEXT[result.error])
             return '';
 
@@ -342,22 +342,30 @@ class ClaudeMonitorIndicator extends PanelMenu.Button {
             if (this._destroyed || switchGeneration !== this._switchGeneration)
                 return;
 
-            /* Only a post-switch 401 earns a retry, and only a bounded one.
-             * The status row keeps saying "Loading…" meanwhile, because a
-             * token that has not been written yet is not an expired token. */
-            if (result.error === Usage.Err.EXPIRED &&
-                this._switchAttempt < SWITCH_RETRY_DELAYS_MS.length) {
-                const delayMs = SWITCH_RETRY_DELAYS_MS[this._switchAttempt];
-                this._switchAttempt++;
+            /* Only a post-switch 401 or a momentarily-missing token earns a
+             * retry, and only a bounded one. `_statusText` keeps the row on
+             * "Loading…" for as long as `_switchRetryId` is set, so neither
+             * this fault nor an ordinary refresh landing mid-ladder can
+             * surface it early. */
+            const retryDelayMs = Usage.switchRetryDelayMs(
+                result.error, this._switchAttempt, result.identity);
 
+            if (retryDelayMs !== null) {
+                this._switchAttempt++;
                 this._switchRetryId = GLib.timeout_add(
-                    GLib.PRIORITY_DEFAULT, delayMs, () => {
+                    GLib.PRIORITY_DEFAULT, retryDelayMs, () => {
                         this._switchRetryId = 0;
+                        if (this._destroyed)
+                            return GLib.SOURCE_REMOVE;
                         this._fetchAfterSwitch();
                         return GLib.SOURCE_REMOVE;
                     });
                 return;
             }
+
+            /* The ladder is over either way — reset so the field is sane at
+             * rest rather than only at the next switch. */
+            this._switchAttempt = 0;
 
             /* Re-adopt: the account may have moved again while this was in
              * flight, and rendering under a stale adopted identity would show

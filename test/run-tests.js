@@ -195,6 +195,60 @@ check('transition: signing in from a signed-out state',
 check('transition: still signed out',
     Usage.identityTransition(true, null, null), 'same');
 
+/* --- post-switch retry ladder ------------------------------------------ */
+
+/* ~/.claude.json and ~/.claude/.credentials.json are written separately, so a
+ * login can present a new email alongside a token that has not landed yet.
+ * switchRetryDelayMs is the decision the ladder in indicator.js runs on —
+ * covered here so exhaustion and the non-retryable errors are assertions
+ * rather than paths only a manual account switch could reach. */
+
+const SWITCHED_TO = 'a1:o1';
+
+check('ladder: first delay',
+    Usage.switchRetryDelayMs(Usage.Err.EXPIRED, 0, SWITCHED_TO), 2000);
+check('ladder: second delay',
+    Usage.switchRetryDelayMs(Usage.Err.EXPIRED, 1, SWITCHED_TO), 5000);
+check('ladder: third delay',
+    Usage.switchRetryDelayMs(Usage.Err.EXPIRED, 2, SWITCHED_TO), 10000);
+/* Three attempts is the whole ladder — the fourth failure has to be shown. */
+check('ladder: exhausted after the third attempt',
+    Usage.switchRetryDelayMs(Usage.Err.EXPIRED, 3, SWITCHED_TO), null);
+
+/* The credentials file lags independently of ~/.claude.json, so a login can
+ * briefly present no token at all rather than a stale one — NO_AUTH earns the
+ * same ladder as EXPIRED. */
+check('ladder: NO_AUTH retried like EXPIRED',
+    Usage.switchRetryDelayMs(Usage.Err.NO_AUTH, 0, SWITCHED_TO), 2000);
+check('ladder: NO_AUTH also exhausts at the same point',
+    Usage.switchRetryDelayMs(Usage.Err.NO_AUTH, 3, SWITCHED_TO), null);
+
+/* A null identity is a genuine sign-out, not a write race — there is no token
+ * by definition, so both errors must be shown immediately rather than
+ * retried. */
+check('ladder: null identity refuses to retry EXPIRED',
+    Usage.switchRetryDelayMs(Usage.Err.EXPIRED, 0, null), null);
+check('ladder: null identity refuses to retry NO_AUTH',
+    Usage.switchRetryDelayMs(Usage.Err.NO_AUTH, 0, null), null);
+
+/* Neither is a symptom of the write race, so retrying them would just delay
+ * an unrelated, already-accurate fault message. */
+check('ladder: OFFLINE is not retried',
+    Usage.switchRetryDelayMs(Usage.Err.OFFLINE, 0, SWITCHED_TO), null);
+check('ladder: RATE_LIMITED is not retried',
+    Usage.switchRetryDelayMs(Usage.Err.RATE_LIMITED, 0, SWITCHED_TO), null);
+
+/* Success has nothing to retry. */
+check('ladder: no error is not retried',
+    Usage.switchRetryDelayMs(null, 0, SWITCHED_TO), null);
+
+/* Malformed attempt counters must fail closed rather than index the array
+ * with something that is not a valid index. */
+check('ladder: a negative attempt is not retried',
+    Usage.switchRetryDelayMs(Usage.Err.EXPIRED, -1, SWITCHED_TO), null);
+check('ladder: a non-integer attempt is not retried',
+    Usage.switchRetryDelayMs(Usage.Err.EXPIRED, 1.5, SWITCHED_TO), null);
+
 /* --- cache ownership --------------------------------------------------- */
 
 /* Claude Code stamps its usage cache with the accountUuid it belongs to, and
