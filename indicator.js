@@ -465,7 +465,26 @@ class ClaudeMonitorIndicator extends PanelMenu.Button {
                  * account's cache. */
                 this._cacheFloorMs = Date.now();
 
-                this._onAccountSwitched(result);
+                /* Only a result without usable data needs the clear-and-refetch
+                 * dance. The poll and the refresh button detect switches too,
+                 * and they arrive holding the new account's live numbers —
+                 * clearing there would spend a second forced request for
+                 * something already in hand, and flicker on the way. And if
+                 * watchAccount fails to install its monitor, the poll is the
+                 * only detector left, so this is an ordinary path rather than
+                 * an exotic one. A cache result still goes the long way round:
+                 * see the switch floor above, a cache can predate the switch
+                 * that just happened. */
+                if (result.source !== 'live') {
+                    this._onAccountSwitched(result);
+                    return;
+                }
+
+                this._adoptIdentity(result.identity);
+                /* Lands cleanly on top of an in-flight ladder: the numbers this
+                 * result carries are the ones the ladder was waiting for. */
+                this._endSwitchLadder();
+                this._render(result);
                 return;
             }
 
