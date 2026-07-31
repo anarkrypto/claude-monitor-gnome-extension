@@ -89,6 +89,37 @@ var severityClass = function (percent) {
     return 'ok';
 };
 
+/* Reduces the signed-in account to one comparable string.
+ *
+ * Claude Code keys its own usage cache on `accountUuid` alone. This is
+ * deliberately stricter: the same account moved between organisations gets
+ * different limits, so the organisation belongs in the identity. The email
+ * fallback exists for accounts whose profile has not been fetched yet. */
+var accountIdentity = function (oauthAccount) {
+    if (!oauthAccount || typeof oauthAccount !== 'object')
+        return null;
+
+    const uuid = oauthAccount.accountUuid;
+    if (typeof uuid === 'string' && uuid) {
+        const org = typeof oauthAccount.organizationUuid === 'string'
+            ? oauthAccount.organizationUuid
+            : '';
+        return `${uuid}:${org}`;
+    }
+
+    const email = oauthAccount.emailAddress;
+    return typeof email === 'string' && email ? email : null;
+};
+
+/* A null `previous` means nothing has been adopted yet — the first read after
+ * enable(). Treating that as a switch would make every Shell restart spend a
+ * redundant live request. Signing out (`current` null) is a real switch. */
+var identityChanged = function (previous, current) {
+    if (previous === null || previous === undefined)
+        return false;
+    return previous !== current;
+};
+
 function _slot(entry) {
     if (!entry)
         return null;
