@@ -73,6 +73,11 @@ class ClaudeMonitorIndicator extends PanelMenu.Button {
          * signed out. */
         this._identity = null;
         this._identityAdopted = false;
+        /* When the account last changed. No cache written before that moment
+         * may be rendered: the cache carries only an accountUuid, so a move
+         * between organisations leaves one on disk that cacheBelongsTo cannot
+         * reject. See Usage.cacheFloor. */
+        this._cacheFloorMs = 0;
 
         /* Separate from _generation on purpose: only a newer switch may cancel
          * a post-switch fetch. An ordinary cache-only read superseding it left
@@ -330,7 +335,9 @@ class ClaudeMonitorIndicator extends PanelMenu.Button {
     /* `force` skips an active backoff, on the same grounds as the refresh
      * button: a person switching accounts is not the traffic that earned the
      * throttle. The backoff state itself is left alone — fetchLive resets it on
-     * success. `notOlderThanMs: 0` because nothing is on screen to protect. */
+     * success. `notOlderThanMs: 0` because nothing is on screen to protect; the
+     * switch floor is what protects this one, since an offline fetch here would
+     * otherwise fall back to the cache of the account we just left. */
     _fetchAfterSwitch() {
         /* Bump both: the render generation so an older in-flight refresh cannot
          * overwrite this, and the switch token, which is what this fetch
@@ -338,7 +345,17 @@ class ClaudeMonitorIndicator extends PanelMenu.Button {
         this._generation++;
         const switchGeneration = ++this._switchGeneration;
 
-        Usage.fetchUsage({ force: true, notOlderThanMs: 0 }).then(result => {
+        Usage.fetchUsage({
+            force: true,
+            notOlderThanMs: 0,
+            cacheFloorMs: this._cacheFloorMs,
+        }).then(result => {
+            /* Deliberately not guarded on _generation, only on the switch
+             * token. This fetch is the only thing that will put numbers back on
+             * a cleared panel, and an ordinary cache-only read bumping the
+             * render generation used to cancel it — leaving the panel stranded
+             * under "Loading…" with nothing in flight. Only a newer switch may
+             * cancel this one. */
             if (this._destroyed || switchGeneration !== this._switchGeneration)
                 return;
 
@@ -399,6 +416,9 @@ class ClaudeMonitorIndicator extends PanelMenu.Button {
             cacheOnly,
             /* What's on screen, so a cache read can't overwrite fresher data. */
             notOlderThanMs: this._dataTimestampMs || 0,
+            /* When the account last changed, so no read of any kind can serve
+             * a cache from before it. */
+            cacheFloorMs: this._cacheFloorMs,
         }).then(result => {
             /* The extension may have been disabled, or a newer refresh may
              * have overtaken this one, while the request was in flight. */
@@ -412,6 +432,13 @@ class ClaudeMonitorIndicator extends PanelMenu.Button {
                 this._identityAdopted, this._identity, result.identity);
 
             if (transition === 'switch') {
+                /* Set here rather than in _onAccountSwitched so it covers every
+                 * way a switch is handled, including the ones that already hold
+                 * the new account's numbers: the floor outlives this render and
+                 * is what stops a later offline fallback reaching the previous
+                 * account's cache. */
+                this._cacheFloorMs = Date.now();
+
                 this._onAccountSwitched(result);
                 return;
             }

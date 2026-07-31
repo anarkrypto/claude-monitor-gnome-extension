@@ -288,6 +288,31 @@ var cacheSupersedes = function (cachedAtMs, displayedAtMs) {
     return cached > (Number.isFinite(displayed) ? displayed : 0);
 };
 
+/* The oldest a cache may be and still be worth rendering, from the two
+ * independent floors a caller has:
+ *
+ *   `displayedAtMs` — what is already on screen. A cache must be strictly
+ *     newer to replace it (see cacheSupersedes).
+ *
+ *   `switchedAtMs` — when the account last changed. accountIdentity pins the
+ *     organisation deliberately, because the same account moved between
+ *     organisations gets different limits; cacheBelongsTo structurally cannot,
+ *     because the cache carries only an accountUuid. So on an org move the
+ *     cache is not disowned, and after the panel clears there is nothing on
+ *     screen to outrank it — the previous organisation's numbers render under
+ *     the new one's name. A switch therefore refuses everything written before
+ *     it outright. Switching back to an account whose cache is still on disk
+ *     loses that shortcut, which is the safe direction to be wrong in.
+ */
+var cacheFloor = function (displayedAtMs, switchedAtMs) {
+    const displayed = Number(displayedAtMs);
+    const switched = Number(switchedAtMs);
+
+    return Math.max(
+        Number.isFinite(displayed) && displayed > 0 ? displayed : 0,
+        Number.isFinite(switched) && switched > 0 ? switched : 0);
+};
+
 var formatAge = function (ageMs) {
     const minutes = Math.floor(ageMs / 60000);
     if (minutes < 1)
@@ -547,11 +572,18 @@ var fetchLive = function (token) {
  * cache-only read resolves to `{skip: true}` unless the cache is strictly
  * newer, so a watcher event can neither blank out nor stale-overwrite good
  * live data. Callers that render must pass it.
+ *
+ * `cacheFloorMs` is when the account last changed, and it is a harder floor:
+ * it applies to the offline fallback too, where `notOlderThanMs` deliberately
+ * does not. Falling back to an older cache is the normal path when the API is
+ * unreachable, but falling back to one from *before* an account switch means
+ * rendering another account's numbers — see cacheFloor.
  */
 var fetchUsage = function ({
     force = false,
     cacheOnly = false,
     notOlderThanMs = 0,
+    cacheFloorMs = 0,
 } = {}) {
     return readAccount().then(account => {
         const fallback = error => {
@@ -559,7 +591,13 @@ var fetchUsage = function ({
             const cached = parseUtilization(account.cached);
             const retryInMs = backoff.remainingMs(nowMs);
 
-            if (cached) {
+            /* Only the switch floor, not notOlderThanMs: serving a cache older
+             * than what is on screen is exactly what this path is *for* when
+             * the API is unreachable. Serving one from before an account
+             * switch is not — that reached straight past the panel clear and
+             * rendered the previous organisation's numbers, because the cache
+             * carries no organizationUuid for cacheBelongsTo to reject. */
+            if (cached && cacheSupersedes(account.cachedAtMs, cacheFloorMs)) {
                 return {
                     email: account.email,
                     identity: account.identity,
@@ -583,7 +621,8 @@ var fetchUsage = function ({
 
         if (cacheOnly) {
             const cached = parseUtilization(account.cached);
-            if (!cached || !cacheSupersedes(account.cachedAtMs, notOlderThanMs)) {
+            const floorMs = cacheFloor(notOlderThanMs, cacheFloorMs);
+            if (!cached || !cacheSupersedes(account.cachedAtMs, floorMs)) {
                 /* Nothing to render — but the identity still travels, because
                  * this is the shape a fresh login arrives in. */
                 return {

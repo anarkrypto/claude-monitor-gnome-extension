@@ -148,6 +148,43 @@ check('cache: a garbage timestamp never wins',
 check('cache: a garbage displayed timestamp is treated as nothing displayed',
     Usage.cacheSupersedes(T_NOW, 'nope'), true);
 
+/* --- a switch is a floor no cache may be served from under ------------ */
+
+/* accountIdentity pins the organisation on purpose — the same account moved
+ * between organisations gets different limits. cacheBelongsTo structurally
+ * cannot: the cache carries only an accountUuid. So on an org move the cache
+ * is not disowned, the panel clears, nothing is left on screen to outrank it,
+ * and the previous organisation's numbers render under the new one's name.
+ * The switch's own timestamp is the missing floor. */
+
+const T_SWITCH = T_NOW - 5 * 60 * 1000;
+
+check('floor: a switch outranks an empty screen',
+    Usage.cacheFloor(0, T_SWITCH), T_SWITCH);
+check('floor: fresher displayed data outranks an older switch',
+    Usage.cacheFloor(T_NOW, T_SWITCH), T_NOW);
+check('floor: a switch outranks older displayed data',
+    Usage.cacheFloor(T_OLD, T_SWITCH), T_SWITCH);
+check('floor: with no switch yet, only what is displayed counts',
+    Usage.cacheFloor(T_NOW, 0), T_NOW);
+check('floor: nothing displayed and no switch imposes no floor',
+    Usage.cacheFloor(0, 0), 0);
+/* _dataTimestampMs is null until the first render, and the fields are passed
+ * straight through — a floor must never come back NaN, which every comparison
+ * would then answer false to. */
+check('floor: a null displayed timestamp is no floor',
+    Usage.cacheFloor(null, T_SWITCH), T_SWITCH);
+check('floor: garbage on either side is no floor',
+    Usage.cacheFloor('nope', undefined), 0);
+check('floor: a negative timestamp is no floor',
+    Usage.cacheFloor(-1, 0), 0);
+
+/* The floor is only useful because cacheSupersedes then refuses the cache. */
+check('floor: a pre-switch cache is refused',
+    Usage.cacheSupersedes(T_OLD, Usage.cacheFloor(0, T_SWITCH)), false);
+check('floor: a cache written after the switch is served',
+    Usage.cacheSupersedes(T_NOW, Usage.cacheFloor(0, T_SWITCH)), true);
+
 /* --- account identity ------------------------------------------------ */
 
 /* The organisation is part of the identity: the same account moved between
@@ -699,6 +736,69 @@ function readAccountReportsUnreadableAsUnknown() {
     });
 }
 
+/* The offline fallback is the path the floor was missing from entirely:
+ * notOlderThanMs only ever gated the cacheOnly branch, so a post-switch fetch
+ * that came back OFFLINE reached straight past the panel clear and served the
+ * account we had just left. */
+function theFallbackRefusesAPreSwitchCache() {
+    resetStubs();
+    Usage.readToken = () => Promise.resolve(null);
+
+    const cachedAtMs = Date.now() - A_CACHE_AGE_MS;
+    const switchedAtMs = cachedAtMs + 60 * 1000;
+
+    Usage.readAccount = () => Promise.resolve(newAccount({
+        cached: Fixtures.CACHED_UTILIZATION,
+        cachedAtMs,
+    }));
+
+    return Usage.fetchUsage({ cacheFloorMs: switchedAtMs }).then(result => {
+        check('async: the fallback refuses a cache from before the switch',
+            result.source, null);
+        check('async: ...and renders nothing rather than another account',
+            result.usage, null);
+        check('async: ...while still reporting the error it fell back from',
+            result.error, Usage.Err.NO_AUTH);
+        check('async: ...and still carrying the identity',
+            result.identity, 'a2:o2');
+
+        /* With no switch to answer to, the same cache is exactly what the
+         * fallback is for — falling back to older data when the API is
+         * unreachable is the normal path, not a degraded one. */
+        return Usage.fetchUsage({ notOlderThanMs: Date.now() });
+    }).then(result => {
+        check('async: without a switch the fallback still serves the cache',
+            result.source, 'cache');
+    });
+}
+
+/* The same floor on the cache-only path, which the watcher uses. */
+function aCacheOnlyReadRefusesAPreSwitchCache() {
+    resetStubs();
+
+    const cachedAtMs = Date.now() - A_CACHE_AGE_MS;
+
+    Usage.readAccount = () => Promise.resolve(newAccount({
+        cached: Fixtures.CACHED_UTILIZATION,
+        cachedAtMs,
+    }));
+
+    return Usage.fetchUsage({ cacheOnly: true, cacheFloorMs: cachedAtMs + 1 })
+        .then(result => {
+            check('async: a cache-only read refuses a pre-switch cache',
+                result.skip, true);
+            /* Even skipping, the identity travels — this is how the watcher
+             * notices the switch in the first place. */
+            check('async: ...and the identity still travels',
+                result.identity, 'a2:o2');
+
+            return Usage.fetchUsage({ cacheOnly: true, cacheFloorMs: cachedAtMs - 1 });
+        }).then(result => {
+            check('async: a cache written after the switch is served',
+                result.source, 'cache');
+        });
+}
+
 const ASYNC_CHECKS = [
     readJsonTellsAbsentFromUnreadable,
     readAccountReportsUnreadableAsUnknown,
@@ -706,6 +806,8 @@ const ASYNC_CHECKS = [
     liveShapeCarriesIdentity,
     fallbackShapesCarryIdentity,
     readAccountDisownsForeignCache,
+    theFallbackRefusesAPreSwitchCache,
+    aCacheOnlyReadRefusesAPreSwitchCache,
 ];
 
 /* --- report --------------------------------------------------------- */
