@@ -16,7 +16,12 @@
 }
 
 /* Severity colours, shared by the panel and the dropdown.
- * > 90 crit, > 60 warn, otherwise ok. */
+ * > 90 crit, > 60 warn, > 30 mid, otherwise ok.
+ *
+ * "mid" deliberately has no rule: colour is inherited in St, so the label
+ * falls back to the panel/menu foreground the shell theme already picked,
+ * which is the one value guaranteed to be legible in light and dark. Adding
+ * a hardcoded neutral here would break one of the two. */
 
 .claude-monitor-value-ok {
     color: #57e389;

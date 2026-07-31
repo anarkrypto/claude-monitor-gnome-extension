@@ -13,6 +13,7 @@ Each number is coloured independently:
 | ----- | ------ |
 | `> 90%` | red |
 | `> 60%` | yellow |
+| `> 30%` | the theme's own text colour |
 | otherwise | green |
 
 Clicking the indicator opens the details:

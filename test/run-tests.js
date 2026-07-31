@@ -87,7 +87,9 @@ check('other scoped model is not fable', Usage.parseUtilization({
 /* --- severityClass -------------------------------------------------- */
 
 check('severity 0', Usage.severityClass(0), 'ok');
-check('severity 60 (boundary, not exceeded)', Usage.severityClass(60), 'ok');
+check('severity 30 (boundary, not exceeded)', Usage.severityClass(30), 'ok');
+check('severity 31', Usage.severityClass(31), 'mid');
+check('severity 60 (boundary, not exceeded)', Usage.severityClass(60), 'mid');
 check('severity 61', Usage.severityClass(61), 'warn');
 check('severity 90 (boundary, not exceeded)', Usage.severityClass(90), 'warn');
 check('severity 91', Usage.severityClass(91), 'crit');

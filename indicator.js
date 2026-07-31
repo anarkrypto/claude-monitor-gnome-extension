@@ -12,7 +12,7 @@ const Me = imports.misc.extensionUtils.getCurrentExtension();
 const Login = Me.imports.login;
 const Usage = Me.imports.usage;
 
-const SEVERITIES = ['ok', 'warn', 'crit', 'none'];
+const SEVERITIES = ['ok', 'mid', 'warn', 'crit', 'none'];
 
 /* How often the "updated N ago" label is recomputed while the menu is open.
  * Only runs while it is actually visible. */

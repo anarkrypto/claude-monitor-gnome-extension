@@ -84,6 +84,8 @@ var severityClass = function (percent) {
         return 'crit';
     if (percent > 60)
         return 'warn';
+    if (percent > 30)
+        return 'mid';
     return 'ok';
 };
 
