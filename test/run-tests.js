@@ -6,7 +6,7 @@
 
 'use strict';
 
-const { GLib } = imports.gi;
+const { Gio, GLib } = imports.gi;
 
 imports.searchPath.unshift(GLib.get_current_dir());
 
@@ -417,17 +417,231 @@ if (iconPixbuf) {
     check('icon: actually draws something', inked > 40, true);
 }
 
+/* --- fetchUsage's return shapes (async) ------------------------------- */
+
+/* Everything above is synchronous. fetchUsage is not — and the invariant this
+ * whole branch rests on, that the account identity travels out on *every*
+ * return path including the `skip` shape a fresh login arrives in, was until
+ * now verified only by a reader having read the code.
+ *
+ * usage.js declares everything with top-level `var`/`function`, and GJS's
+ * legacy imports make those properties of the module object, so fetchUsage's
+ * internal calls to readAccount/readToken/fetchLive resolve through it and
+ * assigning to `Usage.readAccount` really does replace what fetchUsage calls.
+ * Verified on this checkout, not assumed.
+ *
+ * These run after the synchronous checks and report into the same tally. */
+
+const REAL = {
+    accountPath: Usage.accountPath,
+    readAccount: Usage.readAccount,
+    readToken: Usage.readToken,
+    fetchLive: Usage.fetchLive,
+};
+
+/* Each step installs only the stubs it needs; this puts the rest back, so a
+ * step that wants the real readAccount (reading a real file through a stubbed
+ * accountPath) gets it regardless of what ran before. */
+function resetStubs() {
+    Usage.accountPath = REAL.accountPath;
+    Usage.readAccount = REAL.readAccount;
+    Usage.readToken = REAL.readToken;
+    Usage.fetchLive = REAL.fetchLive;
+    Usage.backoff.reset();
+}
+
+const TMP_DIR = GLib.dir_make_tmp('claude-monitor-tests-XXXXXX');
+const tmpPaths = [];
+
+function writeTemp(name, text) {
+    const path = GLib.build_filenamev([TMP_DIR, name]);
+    GLib.file_set_contents(path, text);
+    tmpPaths.push(path);
+    return path;
+}
+
+function cleanupTemp() {
+    for (const path of tmpPaths) {
+        try {
+            Gio.File.new_for_path(path).delete(null);
+        } catch (e) {
+            /* Best effort — a leftover file in /tmp is not a test failure. */
+        }
+    }
+    try {
+        Gio.File.new_for_path(TMP_DIR).delete(null);
+    } catch (e) {
+        /* As above. */
+    }
+}
+
+/* Sequential rather than Promise.all: the steps stub module-level functions,
+ * and overlapping stubs would make a failure depend on scheduling. */
+function sequence(steps) {
+    return steps.reduce((chain, step) => chain.then(() => step()), Promise.resolve());
+}
+
+const A_CACHE_AGE_MS = 10 * 60 * 1000;
+
+function newAccount(overrides) {
+    const account = {
+        email: 'new@example.com',
+        identity: 'a2:o2',
+        cached: null,
+        cachedAtMs: 0,
+    };
+    for (const key in overrides)
+        account[key] = overrides[key];
+    return account;
+}
+
+/* A fresh login arrives as exactly this shape: a new identity, and the previous
+ * account's cache either gone or disowned. A caller that only read identity off
+ * the rendering shape would never see the switch at all. */
+function skipShapeCarriesIdentity() {
+    resetStubs();
+    Usage.readAccount = () => Promise.resolve(newAccount({}));
+
+    return Usage.fetchUsage({ cacheOnly: true }).then(result => {
+        check('async: a cache-only read with nothing to render skips',
+            result.skip, true);
+        check('async: identity travels on the skip shape', result.identity, 'a2:o2');
+        check('async: email travels on the skip shape', result.email, 'new@example.com');
+    });
+}
+
+function liveShapeCarriesIdentity() {
+    resetStubs();
+    Usage.readAccount = () => Promise.resolve(newAccount({}));
+    Usage.readToken = () => Promise.resolve('token');
+    Usage.fetchLive = () => Promise.resolve({
+        usage: Usage.parseUtilization(Fixtures.LIVE_RESPONSE),
+    });
+
+    return Usage.fetchUsage().then(result => {
+        check('async: identity travels on the live shape', result.identity, 'a2:o2');
+        check('async: a live result says so', result.source, 'live');
+        check('async: a live result carries the fetched numbers',
+            result.usage.session.percent, 49);
+    });
+}
+
+function fallbackShapesCarryIdentity() {
+    resetStubs();
+    Usage.readToken = () => Promise.resolve(null);
+    Usage.readAccount = () => Promise.resolve(newAccount({
+        cached: Fixtures.CACHED_UTILIZATION,
+        cachedAtMs: Date.now() - A_CACHE_AGE_MS,
+    }));
+
+    return Usage.fetchUsage().then(result => {
+        check('async: identity travels on the cache fallback shape',
+            result.identity, 'a2:o2');
+        check('async: the cache fallback says where the numbers came from',
+            result.source, 'cache');
+        check('async: the cache fallback still reports why it fell back',
+            result.error, Usage.Err.NO_AUTH);
+
+        /* The no-cache fallback is the shape a login with no token yet takes,
+         * and it is what the post-switch retry ladder reads its identity off. */
+        Usage.readAccount = () => Promise.resolve(newAccount({}));
+        return Usage.fetchUsage();
+    }).then(result => {
+        check('async: identity travels on the no-cache fallback shape',
+            result.identity, 'a2:o2');
+        check('async: the no-cache fallback has nothing to render',
+            result.usage, null);
+        check('async: the no-cache fallback reports no-auth',
+            result.error, Usage.Err.NO_AUTH);
+    });
+}
+
+/* cacheBelongsTo is covered as a predicate above. This covers readAccount
+ * actually applying it to a real file: between an account switch and Claude
+ * Code's next read, ~/.claude.json holds the new account's identity beside the
+ * old account's usage. */
+function readAccountDisownsForeignCache() {
+    resetStubs();
+
+    const claudeJson = stamp => JSON.stringify({
+        oauthAccount: {
+            accountUuid: 'a2',
+            organizationUuid: 'o2',
+            emailAddress: 'new@example.com',
+        },
+        cachedUsageUtilization: {
+            accountUuid: stamp,
+            fetchedAtMs: 1700000000000,
+            utilization: Fixtures.CACHED_UTILIZATION,
+        },
+    });
+
+    const foreignPath = writeTemp('foreign-cache.json', claudeJson('a1'));
+    const ownPath = writeTemp('own-cache.json', claudeJson('a2'));
+
+    Usage.accountPath = () => foreignPath;
+
+    return Usage.readAccount().then(account => {
+        check('async: a foreign-stamped cache is dropped end-to-end',
+            account.cached, null);
+        /* The timestamp has to go with it, or the age label would describe a
+         * cache that is not being shown. */
+        check('async: a dropped cache takes its timestamp with it',
+            account.cachedAtMs, 0);
+        check('async: the new account is still read off the same file',
+            account.identity, 'a2:o2');
+        check('async: and so is its email', account.email, 'new@example.com');
+
+        Usage.accountPath = () => ownPath;
+        return Usage.readAccount();
+    }).then(account => {
+        check('async: our own cache survives the same read',
+            account.cached !== null, true);
+        check('async: and keeps its timestamp',
+            account.cachedAtMs, 1700000000000);
+    });
+}
+
+const ASYNC_CHECKS = [
+    skipShapeCarriesIdentity,
+    liveShapeCarriesIdentity,
+    fallbackShapesCarryIdentity,
+    readAccountDisownsForeignCache,
+];
+
 /* --- report --------------------------------------------------------- */
 
-print('');
-if (failures.length === 0) {
-    print(`  All ${passed} assertions passed.`);
+function report() {
     print('');
-} else {
+    if (failures.length === 0) {
+        print(`  All ${passed} assertions passed.`);
+        print('');
+        return 0;
+    }
+
     print(`  ${passed} passed, ${failures.length} FAILED`);
     print('');
     for (const failure of failures)
         print(`  ✗ ${failure}`);
     print('');
-    imports.system.exit(1);
+    return 1;
 }
+
+/* The synchronous checks are all in by now. The async ones need a main loop to
+ * turn, so the tally is only final once it has stopped. */
+const loop = GLib.MainLoop.new(null, false);
+let exitCode = 0;
+
+sequence(ASYNC_CHECKS).catch(error => {
+    failures.push(`async section threw (it never should)\n      ${error}`);
+}).then(() => {
+    resetStubs();
+    cleanupTemp();
+    exitCode = report();
+    loop.quit();
+});
+
+loop.run();
+
+if (exitCode !== 0)
+    imports.system.exit(1);
