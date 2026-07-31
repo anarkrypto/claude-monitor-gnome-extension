@@ -148,6 +148,18 @@ self-inconsistent by design, not by bug. That gap is the whole reason this
 extension carries its own ownership check instead of trusting the file to
 already be clean by the time it reads it.
 
+The stamp is an `accountUuid` and nothing else, and that is as strict as any
+ownership check reading this file can be. This extension's own notion of
+identity is stricter — it pins the organisation too, because the same account
+moved between organisations is subject to different limits — so there is a
+class of switch the stamp cannot see at all: same account, different
+organisation, cache accepted as "ours", numbers wrong. A guard cannot be
+stricter than the data it has, so the missing strictness comes from elsewhere:
+the moment a switch is detected becomes a floor, and no cache written before it
+may be rendered on any path. Switching back to an account whose cache is still
+on disk gives up the shortcut and waits for the API, which is the safe
+direction to be wrong in.
+
 Logout is handled differently: `cachedUsageUtilization` is cleared in the same
 state update that clears `oauthAccount`, not lazily on the next read —
 

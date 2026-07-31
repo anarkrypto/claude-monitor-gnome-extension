@@ -114,15 +114,25 @@ inside Claude Code itself. Signing out, and signing out then straight back in
 as someone else, are both handled the same way; the second is worth calling
 out because it's an ordinary way to change accounts, not an edge case.
 
-On a switch the panel clears to `— | —` and shows the new email immediately,
-rather than holding the previous account's numbers until fresh ones arrive.
+When the switch is noticed without the new account's numbers to hand — the
+usual case, since the file watcher notices it first — the panel clears to
+`— | —` and shows the new email immediately, rather than holding the previous
+account's numbers until fresh ones arrive.
 The panel is read at a glance, and a wrong number read at a glance is worse
 than an em dash. Holding also has the worse failure mode: going offline
 mid-switch would strand one account's usage sitting under another account's
 name, with nothing on screen to say so. For the same reason, a usage cache
 left over from a different account is ignored rather than shown — see
 [`docs/anthropic-usage-endpoint.md`](docs/anthropic-usage-endpoint.md) for why
-one can be sitting on disk at all.
+one can be sitting on disk at all. A cache written *before* the switch is
+refused outright, on top of that check: the cache is stamped with an account
+but never with an organisation, so the same account moved between
+organisations — which gets different limits, and so counts as a switch — leaves
+one behind that the stamp cannot rule out.
+
+If the switch is instead noticed by the 5 minute poll or by pressing `⟳`, the
+new account's numbers are already in hand, so they go straight up: no clear, no
+second request.
 
 Immediately after a switch the extension retries briefly — at 2s, 5s, then
 10s — if the new account's token hasn't been written to disk yet, so a
@@ -157,15 +167,17 @@ panel foreground instead, like a standard status icon, delete the CSS rule.
 `gjs`:
 
 ```sh
-gjs test/run-tests.js    # 110 assertions, no network, no credentials
+gjs test/run-tests.js    # 205 assertions, no network, no credentials
 gjs test/smoke-live.js   # real end-to-end run: prints what the panel would show
 ```
 
 `run-tests.js` covers parsing, the five_hour/seven_day fallback, Fable scope
-matching, colour thresholds, time formatting, and the terminal argv table —
-a typo there would otherwise only surface the day someone clicks Switch
-Account. `smoke-live.js` asserts nothing; it exists so the file and HTTP half
-can be checked without restarting the Shell.
+matching, colour thresholds, time formatting, account-switch detection, and the
+terminal argv table — a typo there would otherwise only surface the day someone
+clicks Switch Account. Its last section is asynchronous: it stubs `usage.js`'s
+own file and HTTP functions through the module object to assert what
+`fetchUsage` returns on each of its paths. `smoke-live.js` asserts nothing; it
+exists so the file and HTTP half can be checked without restarting the Shell.
 
 ## Development
 
