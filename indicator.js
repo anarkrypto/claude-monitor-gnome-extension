@@ -414,14 +414,22 @@ class ClaudeMonitorIndicator extends PanelMenu.Button {
     }
 
     /* Everything that ends a ladder, in one place: the pending retry if there
-     * is one, the attempt counter, and the flag the status row guards on.
-     * Every terminal path goes through here — the ladder giving up, a second
-     * switch starting a new one, a switch that already has live data, and
-     * destroy — so the flag can never outlive the thing it describes. */
+     * is one, the attempt counter, the flag the status row guards on, and the
+     * token any request still in flight for it is holding. Every terminal path
+     * goes through here — the ladder giving up, a second switch starting a new
+     * one, a switch that already has live data, and destroy — so the flag can
+     * never outlive the thing it describes.
+     *
+     * The token bump matters most on the path that ends a ladder without
+     * starting another: a request still in flight for the account we just left
+     * would otherwise pass its guard and render that account's numbers over the
+     * ones already on screen — and, if it carried a 401, start a fresh retry
+     * with the status-row flag already down. */
     _endSwitchLadder() {
         this._cancelSwitchRetry();
         this._switchAttempt = 0;
         this._switchLadderActive = false;
+        this._switchGeneration++;
     }
 
     _cancelSwitchRetry() {
