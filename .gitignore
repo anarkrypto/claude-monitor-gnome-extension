@@ -4,6 +4,7 @@
 # Brainstorming and planning scratch. Useful while the work is in flight, but
 # the design that survives belongs in docs/ and in commit messages, not here.
 docs/superpowers/
+.superpowers/
 
 # Editors / OS
 *.swp
