@@ -190,6 +190,29 @@ check('switch: the same account in another org is a switch',
 check('switch: logout is a switch',
     Usage.identityChanged('a1:o1', null), true);
 
+/* --- cache ownership --------------------------------------------------- */
+
+/* Claude Code stamps its usage cache with the accountUuid it belongs to, and
+ * only prunes a foreign one when Claude Code itself next reads it. Between an
+ * account switch and that read, ~/.claude.json holds the new account's identity
+ * beside the old account's usage — so the guard has to be ours as well. */
+check('owner: matching uuid is ours',
+    Usage.cacheBelongsTo({ accountUuid: 'a1' }, 'a1'), true);
+check('owner: a foreign uuid is not',
+    Usage.cacheBelongsTo({ accountUuid: 'a1' }, 'a2'), false);
+/* accountUuid is optional in Claude Code's schema — an unstamped cache has
+ * nothing to contradict. */
+check('owner: no uuid on the cache has nothing to contradict',
+    Usage.cacheBelongsTo({ fetchedAtMs: 1 }, 'a1'), true);
+check('owner: an empty uuid is treated as absent',
+    Usage.cacheBelongsTo({ accountUuid: '' }, 'a1'), true);
+/* Signed out with a stamped cache left behind: serving it would attribute
+ * someone's usage to "No account found". */
+check('owner: a stamped cache with no account to compare is foreign',
+    Usage.cacheBelongsTo({ accountUuid: 'a1' }, undefined), false);
+check('owner: missing cache', Usage.cacheBelongsTo(null, 'a1'), false);
+check('owner: garbage cache', Usage.cacheBelongsTo('nope', 'a1'), false);
+
 /* --- rate-limit backoff ---------------------------------------------- */
 
 const MIN = 60 * 1000;

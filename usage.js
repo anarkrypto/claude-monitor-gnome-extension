@@ -120,6 +120,23 @@ var identityChanged = function (previous, current) {
     return previous !== current;
 };
 
+/* Whether a cached utilization block belongs to the account currently signed
+ * in. The cache carries only `accountUuid`, so this cannot be as strict as
+ * accountIdentity, which also pins the organisation — a guard cannot be
+ * stricter than the data it has. An unstamped cache is accepted because the
+ * field is optional in Claude Code's schema and there is nothing to
+ * contradict; a stamped one with no account to compare against is not. */
+var cacheBelongsTo = function (cache, accountUuid) {
+    if (!cache || typeof cache !== 'object')
+        return false;
+
+    const stamp = cache.accountUuid;
+    if (typeof stamp !== 'string' || !stamp)
+        return true;
+
+    return stamp === accountUuid;
+};
+
 function _slot(entry) {
     if (!entry)
         return null;
@@ -297,23 +314,26 @@ var watchAccount = function (onChanged, debounceMs = 2000) {
     };
 };
 
-/* One read of ~/.claude.json yields both the signed-in email and the cache we
- * fall back to when the API is unreachable. */
+/* One read of ~/.claude.json yields the signed-in email, an identity to compare
+ * against later reads, and the cache we fall back to when the API is
+ * unreachable — but only when that cache belongs to the account signed in now. */
 var readAccount = function () {
     const path = accountPath();
 
     return _readJson(path).then(data => {
-        const empty = { email: null, cached: null, cachedAtMs: 0 };
+        const empty = { email: null, identity: null, cached: null, cachedAtMs: 0 };
         if (!data)
             return empty;
 
         const account = data.oauthAccount || {};
         const cache = data.cachedUsageUtilization || null;
+        const ours = cacheBelongsTo(cache, account.accountUuid);
 
         return {
             email: account.emailAddress || null,
-            cached: cache ? cache.utilization || null : null,
-            cachedAtMs: cache ? Number(cache.fetchedAtMs) || 0 : 0,
+            identity: accountIdentity(data.oauthAccount),
+            cached: ours ? cache.utilization || null : null,
+            cachedAtMs: ours ? Number(cache.fetchedAtMs) || 0 : 0,
         };
     });
 };
