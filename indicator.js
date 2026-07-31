@@ -369,8 +369,12 @@ class ClaudeMonitorIndicator extends PanelMenu.Button {
 
             /* Re-adopt: the account may have moved again while this was in
              * flight, and rendering under a stale adopted identity would show
-             * a third account's numbers until the next read corrected it. */
-            this._adoptIdentity(result.identity);
+             * a third account's numbers until the next read corrected it.
+             * Never `undefined` though — that is the account file being
+             * unreadable, and adopting it would make the next good read look
+             * like yet another switch. */
+            if (result.identity !== undefined)
+                this._adoptIdentity(result.identity);
             this._render(result);
         }).catch(error => {
             logError(error, 'claude-monitor: post-switch refresh failed');
@@ -411,7 +415,15 @@ class ClaudeMonitorIndicator extends PanelMenu.Button {
                 this._onAccountSwitched(result);
                 return;
             }
-            this._adoptIdentity(result.identity);
+
+            /* 'unknown' is ~/.claude.json being unreadable — a torn write, a
+             * permission problem — which says nothing about who is signed in.
+             * Leave the adopted identity alone: adopting `undefined` would make
+             * the next good read look like a switch and spend a forced request
+             * on it. The result itself is still rendered normally; whatever
+             * error it carries is the truth about the API, not about identity. */
+            if (transition !== 'unknown')
+                this._adoptIdentity(result.identity);
 
             /* A cache-only read with nothing cached — leave what's on screen. */
             if (result.skip)

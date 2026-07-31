@@ -86,12 +86,17 @@ var SWITCH_RETRY_DELAYS_MS = [2000, 5000, 10000];
  *
  * `identity` is the account the switch moved *to*. When it is null the user
  * genuinely signed out: there is no token by definition, so "not signed in" is
- * the truth and must be shown immediately rather than retried.
+ * the truth and must be shown immediately rather than retried. When it is
+ * undefined the account file could not be read (see readAccount), and inside
+ * this window that is most likely the very write race the ladder exists for —
+ * so it keeps waiting rather than reporting a successful login as a fault.
+ * Either way the ladder is bounded, so a genuinely unreadable file costs three
+ * attempts and then says what it found.
  *
  * Lives here rather than in indicator.js so the harness can cover exhaustion
  * and the non-retryable errors — indicator.js needs St and a running Shell. */
 var switchRetryDelayMs = function (error, attempt, identity) {
-    if (identity === null || identity === undefined)
+    if (identity === null)
         return null;
     if (error !== Err.EXPIRED && error !== Err.NO_AUTH)
         return null;
@@ -144,9 +149,10 @@ var accountIdentity = function (oauthAccount) {
 
 /* What a freshly read identity means for what is currently on screen:
  *
- *   'adopt'  — nothing on screen yet; take this identity and render normally
- *   'same'   — unchanged; carry on
- *   'switch' — the account changed; clear and refetch
+ *   'unknown' — the account file could not be read; decide nothing
+ *   'adopt'   — nothing on screen yet; take this identity and render normally
+ *   'same'    — unchanged; carry on
+ *   'switch'  — the account changed; clear and refetch
  *
  * `hasAdopted` is separate from `adopted` because null is a legitimate adopted
  * value: it is the signed-out state. Conflating "nothing adopted yet" with
@@ -156,6 +162,13 @@ var accountIdentity = function (oauthAccount) {
  * This decision lives here rather than in indicator.js so it can be tested
  * under plain gjs — indicator.js needs St and a running Shell. */
 var identityTransition = function (hasAdopted, adopted, current) {
+    /* undefined means the account file could not be read — no information,
+     * which is not the same as being signed out. Reading a torn or unreadable
+     * file as a sign-out cost a spurious clear plus a forced request, and
+     * poisoned the adopted value so the next good read spent another one. */
+    if (current === undefined)
+        return 'unknown';
+
     if (!hasAdopted)
         return 'adopt';
     if (adopted === current)
@@ -292,6 +305,20 @@ var formatAge = function (ageMs) {
  * File access
  * ------------------------------------------------------------------ */
 
+/* Reads a JSON file, keeping "not there" and "could not be read" apart:
+ *
+ *   the parsed value — the file was read and parsed
+ *   null             — the file is genuinely absent (Gio's NOT_FOUND). For
+ *                      ~/.claude.json that is a real signed-out state.
+ *   undefined        — no information. Any other load error, or contents that
+ *                      did not parse: a permission problem, a truncated read,
+ *                      a half-written file.
+ *
+ * The distinction matters because identity now drives control flow. Claude
+ * Code 2.1.220 writes ~/.claude.json atomically (temp + fchmod + fsync +
+ * rename), but it also has a documented non-atomic fallback path, and reading
+ * a torn file as a sign-out is a silent, self-amplifying failure — see
+ * readAccount. */
 function _readJson(path) {
     return new Promise(resolve => {
         const file = Gio.File.new_for_path(path);
@@ -299,17 +326,23 @@ function _readJson(path) {
             let text = null;
             try {
                 const [ok, contents] = source.load_contents_finish(result);
-                if (ok)
-                    text = ByteArray.toString(contents);
+                if (!ok) {
+                    resolve(undefined);
+                    return;
+                }
+                text = ByteArray.toString(contents);
             } catch (e) {
-                resolve(null);
+                const absent = typeof e.matches === 'function' &&
+                    e.matches(Gio.IOErrorEnum, Gio.IOErrorEnum.NOT_FOUND);
+                resolve(absent ? null : undefined);
                 return;
             }
 
             try {
-                resolve(text ? JSON.parse(text) : null);
+                /* An empty file is a write in progress, not an empty document. */
+                resolve(text ? JSON.parse(text) : undefined);
             } catch (e) {
-                resolve(null);
+                resolve(undefined);
             }
         });
     });
@@ -359,11 +392,20 @@ var watchAccount = function (onChanged, debounceMs = 2000) {
 
 /* One read of ~/.claude.json yields the signed-in email, an identity to compare
  * against later reads, and the cache we fall back to when the API is
- * unreachable — but only when that cache belongs to the account signed in now. */
+ * unreachable — but only when that cache belongs to the account signed in now.
+ *
+ * `identity` is `undefined` when the file could not be read at all, and `null`
+ * when it is genuinely absent or carries no oauthAccount. Reading the first as
+ * the second cost a spurious panel clear plus a forced request, poisoned the
+ * adopted identity so the next good read spent another one, and inside a
+ * post-switch retry ladder reported a successful login as a dead token. */
 var readAccount = function () {
     const path = accountPath();
 
     return _readJson(path).then(data => {
+        if (data === undefined)
+            return { email: null, identity: undefined, cached: null, cachedAtMs: 0 };
+
         const empty = { email: null, identity: null, cached: null, cachedAtMs: 0 };
         if (!data)
             return empty;

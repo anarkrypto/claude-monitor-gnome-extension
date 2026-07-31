@@ -195,6 +195,23 @@ check('transition: signing in from a signed-out state',
 check('transition: still signed out',
     Usage.identityTransition(true, null, null), 'same');
 
+/* Regression: ~/.claude.json failing to read — a torn write, a permission
+ * problem — resolved the same identity a genuine sign-out does. Since identity
+ * drives control flow, that cost a spurious panel clear plus a forced request,
+ * and poisoned the adopted value so the next good read spent another one. */
+check('transition: an unreadable account file decides nothing',
+    Usage.identityTransition(true, 'a1:o1', undefined), 'unknown');
+/* Ahead of the hasAdopted rule on purpose: an unreadable file at startup is
+ * not "nothing on screen yet", it is nothing known — adopting undefined would
+ * make the first good read look like a switch. */
+check('transition: unreadable before anything was adopted',
+    Usage.identityTransition(false, null, undefined), 'unknown');
+check('transition: unreadable while signed out',
+    Usage.identityTransition(true, null, undefined), 'unknown');
+/* The distinction this rule exists for: same call site, different meaning. */
+check('transition: a genuine logout is still a switch',
+    Usage.identityTransition(true, 'a1:o1', null), 'switch');
+
 /* --- post-switch retry ladder ------------------------------------------ */
 
 /* ~/.claude.json and ~/.claude/.credentials.json are written separately, so a
@@ -230,6 +247,21 @@ check('ladder: null identity refuses to retry EXPIRED',
     Usage.switchRetryDelayMs(Usage.Err.EXPIRED, 0, null), null);
 check('ladder: null identity refuses to retry NO_AUTH',
     Usage.switchRetryDelayMs(Usage.Err.NO_AUTH, 0, null), null);
+
+/* An undefined identity is ~/.claude.json failing to read, which in this
+ * window is most likely the same half-written file the ladder exists for.
+ * Regression: it used to share the sign-out branch, so an unreadable file
+ * landing mid-ladder ended it and reported a successful login as a dead
+ * token. The ladder is bounded, so a genuinely unreadable file still gets
+ * answered — three attempts later. */
+check('ladder: an unreadable account file keeps waiting on EXPIRED',
+    Usage.switchRetryDelayMs(Usage.Err.EXPIRED, 0, undefined), 2000);
+check('ladder: an unreadable account file keeps waiting on NO_AUTH',
+    Usage.switchRetryDelayMs(Usage.Err.NO_AUTH, 1, undefined), 5000);
+check('ladder: an unreadable account file still exhausts',
+    Usage.switchRetryDelayMs(Usage.Err.EXPIRED, 3, undefined), null);
+check('ladder: an unreadable account file does not retry OFFLINE',
+    Usage.switchRetryDelayMs(Usage.Err.OFFLINE, 0, undefined), null);
 
 /* Neither is a symptom of the write race, so retrying them would just delay
  * an unrelated, already-accurate fault message. */
@@ -602,7 +634,74 @@ function readAccountDisownsForeignCache() {
     });
 }
 
+/* An unreadable ~/.claude.json used to be indistinguishable from a signed-out
+ * one, and identity now drives control flow. These read real files through the
+ * real Gio path, because the three cases are told apart by the error Gio
+ * raises — a stub could only assert the mapping we wrote. */
+function readJsonTellsAbsentFromUnreadable() {
+    resetStubs();
+
+    const validPath = writeTemp('valid.json', '{"oauthAccount":{"accountUuid":"a2"}}');
+    const tornPath = writeTemp('torn.json', '{"oauthAccount": {"accou');
+    const emptyPath = writeTemp('empty.json', '');
+    const missingPath = GLib.build_filenamev([TMP_DIR, 'not-there.json']);
+
+    return Usage._readJson(validPath).then(data => {
+        check('async: a readable file parses', data.oauthAccount.accountUuid, 'a2');
+        return Usage._readJson(missingPath);
+    }).then(data => {
+        /* Genuinely absent. For ~/.claude.json that is a real signed-out
+         * state, and null is what says so. */
+        check('async: an absent file reads as null', data, null);
+        check('async: an absent file is not "no information"',
+            data === undefined, false);
+        return Usage._readJson(tornPath);
+    }).then(data => {
+        /* Claude Code writes this file atomically but has a documented
+         * non-atomic fallback path. A half-written file is no information. */
+        check('async: a torn file reads as undefined', data === undefined, true);
+        return Usage._readJson(emptyPath);
+    }).then(data => {
+        check('async: an empty file is a write in progress, not a document',
+            data === undefined, true);
+        /* Any load error other than NOT_FOUND. A directory is used because it
+         * fails the same way a permission problem does but does not depend on
+         * which user runs the suite. */
+        return Usage._readJson(TMP_DIR);
+    }).then(data => {
+        check('async: a load failure that is not NOT_FOUND reads as undefined',
+            data === undefined, true);
+    });
+}
+
+function readAccountReportsUnreadableAsUnknown() {
+    resetStubs();
+
+    const tornPath = writeTemp('torn-account.json', '{"oauthAccount": {"accou');
+    const missingPath = GLib.build_filenamev([TMP_DIR, 'no-account.json']);
+
+    Usage.accountPath = () => tornPath;
+
+    return Usage.readAccount().then(account => {
+        check('async: an unreadable account file yields no identity at all',
+            account.identity === undefined, true);
+        /* The whole point: the same call site, told apart downstream. */
+        check('async: ...which the transition reads as no information',
+            Usage.identityTransition(true, 'a1:o1', account.identity), 'unknown');
+
+        Usage.accountPath = () => missingPath;
+        return Usage.readAccount();
+    }).then(account => {
+        check('async: an absent account file is a real signed-out state',
+            account.identity, null);
+        check('async: ...which the transition reads as a switch',
+            Usage.identityTransition(true, 'a1:o1', account.identity), 'switch');
+    });
+}
+
 const ASYNC_CHECKS = [
+    readJsonTellsAbsentFromUnreadable,
+    readAccountReportsUnreadableAsUnknown,
     skipShapeCarriesIdentity,
     liveShapeCarriesIdentity,
     fallbackShapesCarryIdentity,
