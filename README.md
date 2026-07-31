@@ -1,6 +1,6 @@
-# Claude Monitor
+# Claude Monitor | GNOME Shell Extension
 
-A GNOME Shell extension that shows your Claude Code usage limits in the top bar.
+Shows your Claude Code usage limits in the top bar.
 
 ```
 ✳ 48% | 75%

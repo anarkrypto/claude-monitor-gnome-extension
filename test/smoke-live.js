@@ -2,7 +2,7 @@
 /* smoke-live.js — runs the real fetchUsage() chain (files + HTTP) outside
  * GNOME Shell and prints exactly what the indicator would render.
  *
- *   cd claude-monitor@anarkrypto && gjs test/smoke-live.js
+ *   cd claude-monitor-gnome-extension && gjs test/smoke-live.js
  *
  * Touches the network and reads your real credentials. Unlike run-tests.js it
  * asserts nothing — it is here so the IO half can be checked without

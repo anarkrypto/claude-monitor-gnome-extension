@@ -1,7 +1,7 @@
 #!/usr/bin/env gjs
 /* run-tests.js — exercises the pure half of usage.js outside GNOME Shell.
  *
- *   cd claude-monitor@anarkrypto && gjs test/run-tests.js
+ *   cd claude-monitor-gnome-extension && gjs test/run-tests.js
  */
 
 'use strict';
