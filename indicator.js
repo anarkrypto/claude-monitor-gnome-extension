@@ -18,6 +18,10 @@ const SEVERITIES = ['ok', 'mid', 'warn', 'crit', 'none'];
  * Only runs while it is actually visible. */
 const AGE_TICK_SECONDS = 15;
 
+/* Shown between noticing a switch and having the new account's numbers. Not an
+ * entry in ERROR_TEXT: it is a transient state, not a fault. */
+const SWITCH_STATUS = 'Loading usage for the new account…';
+
 const ERROR_TEXT = {
     'no-auth': 'Not signed in — use Switch Account to sign in',
     'expired': 'Token expired — sign in again to refresh it',
@@ -64,6 +68,9 @@ class ClaudeMonitorIndicator extends PanelMenu.Button {
          * keeps counting up between renders. */
         this._dataTimestampMs = null;
         this._ageTickId = 0;
+        /* The account the numbers on screen belong to. Null until the first
+         * read adopts one. */
+        this._identity = null;
 
         this._buildPanel(extensionPath);
         this._buildMenu();
@@ -269,6 +276,47 @@ class ClaudeMonitorIndicator extends PanelMenu.Button {
         this._statusItem.visible = status.length > 0;
     }
 
+    /* The numbers on screen belong to the account we just left. Clearing beats
+     * holding them until the new ones arrive: the panel is read at a glance
+     * from the top of the screen, and a wrong number read at a glance is worse
+     * than an em dash. Holding also has the worse failure mode — going offline
+     * mid-switch would strand one account's usage under another's name with
+     * nothing indicating it. */
+    _onAccountSwitched(result) {
+        this._identity = result.identity;
+
+        this._render({
+            email: result.email,
+            usage: null,
+            source: null,
+            ageMs: 0,
+            retryInMs: 0,
+            error: null,
+        });
+
+        /* After _render, which clears the status row on its way past. */
+        this._statusItem.label.text = SWITCH_STATUS;
+        this._statusItem.visible = true;
+
+        this._fetchAfterSwitch();
+    }
+
+    /* `force` skips an active backoff, on the same grounds as the refresh
+     * button: a person switching accounts is not the traffic that earned the
+     * throttle. The backoff state itself is left alone — fetchLive resets it on
+     * success. `notOlderThanMs: 0` because nothing is on screen to protect. */
+    _fetchAfterSwitch() {
+        const generation = ++this._generation;
+
+        Usage.fetchUsage({ force: true, notOlderThanMs: 0 }).then(result => {
+            if (this._destroyed || generation !== this._generation)
+                return;
+            this._render(result);
+        }).catch(error => {
+            logError(error, 'claude-monitor: post-switch refresh failed');
+        });
+    }
+
     refresh({ force = false, cacheOnly = false } = {}) {
         if (this._destroyed)
             return;
@@ -285,6 +333,16 @@ class ClaudeMonitorIndicator extends PanelMenu.Button {
              * have overtaken this one, while the request was in flight. */
             if (this._destroyed || generation !== this._generation)
                 return;
+
+            /* Checked ahead of `skip`, because a cache-only read with nothing
+             * to render is exactly how a fresh login arrives: new identity,
+             * and the previous account's cache gone or disowned. */
+            if (Usage.identityChanged(this._identity, result.identity)) {
+                this._onAccountSwitched(result);
+                return;
+            }
+            this._identity = result.identity;
+
             /* A cache-only read with nothing cached — leave what's on screen. */
             if (result.skip)
                 return;
