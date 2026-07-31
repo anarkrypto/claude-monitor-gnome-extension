@@ -175,20 +175,25 @@ check('identity: email form has no colon',
 
 /* --- switch detection ------------------------------------------------- */
 
-/* A null `previous` is the first read after enable() — adoption, not a switch.
- * Without this every Shell restart would fire a redundant live fetch. */
-check('switch: adoption from null is not a switch',
-    Usage.identityChanged(null, 'a1:o1'), false);
-check('switch: undefined previous is not a switch',
-    Usage.identityChanged(undefined, 'a1:o1'), false);
-check('switch: identical is not a switch',
-    Usage.identityChanged('a1:o1', 'a1:o1'), false);
-check('switch: a different account is a switch',
-    Usage.identityChanged('a1:o1', 'a2:o1'), true);
-check('switch: the same account in another org is a switch',
-    Usage.identityChanged('a1:o1', 'a1:o2'), true);
-check('switch: logout is a switch',
-    Usage.identityChanged('a1:o1', null), true);
+/* Nothing adopted yet is the first read after enable(). Treating it as a
+ * switch would make every Shell restart spend a redundant live request. */
+check('transition: nothing adopted yet',
+    Usage.identityTransition(false, null, 'a1:o1'), 'adopt');
+check('transition: nothing adopted, and still signed out',
+    Usage.identityTransition(false, null, null), 'adopt');
+check('transition: identical', Usage.identityTransition(true, 'a1:o1', 'a1:o1'), 'same');
+check('transition: a different account',
+    Usage.identityTransition(true, 'a1:o1', 'a2:o1'), 'switch');
+check('transition: the same account in another org',
+    Usage.identityTransition(true, 'a1:o1', 'a1:o2'), 'switch');
+check('transition: logout', Usage.identityTransition(true, 'a1:o1', null), 'switch');
+/* Regression: signing out and back in is an ordinary way to change accounts.
+ * While null doubled as "nothing adopted", this read as a first-ever read and
+ * the login went unnoticed until the next poll. */
+check('transition: signing in from a signed-out state',
+    Usage.identityTransition(true, null, 'a2:o2'), 'switch');
+check('transition: still signed out',
+    Usage.identityTransition(true, null, null), 'same');
 
 /* --- cache ownership --------------------------------------------------- */
 

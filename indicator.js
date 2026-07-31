@@ -68,9 +68,16 @@ class ClaudeMonitorIndicator extends PanelMenu.Button {
          * keeps counting up between renders. */
         this._dataTimestampMs = null;
         this._ageTickId = 0;
-        /* The account the numbers on screen belong to. Null until the first
-         * read adopts one. */
+        /* The account the numbers on screen belong to, and whether anything
+         * has been adopted at all — null is a real value here, it means
+         * signed out. */
         this._identity = null;
+        this._identityAdopted = false;
+
+        /* Separate from _generation on purpose: only a newer switch may cancel
+         * a post-switch fetch. An ordinary cache-only read superseding it left
+         * the panel stranded under a "Loading…" status with nothing in flight. */
+        this._switchGeneration = 0;
 
         this._buildPanel(extensionPath);
         this._buildMenu();
@@ -283,7 +290,7 @@ class ClaudeMonitorIndicator extends PanelMenu.Button {
      * mid-switch would strand one account's usage under another's name with
      * nothing indicating it. */
     _onAccountSwitched(result) {
-        this._identity = result.identity;
+        this._adoptIdentity(result.identity);
 
         this._render({
             email: result.email,
@@ -294,11 +301,18 @@ class ClaudeMonitorIndicator extends PanelMenu.Button {
             error: null,
         });
 
-        /* After _render, which clears the status row on its way past. */
-        this._statusItem.label.text = SWITCH_STATUS;
-        this._statusItem.visible = true;
+        /* After _render, which clears the status row on its way past. Not shown
+         * on a sign-out: there is no new account to load. */
+        const status = result.identity ? SWITCH_STATUS : '';
+        this._statusItem.label.text = status;
+        this._statusItem.visible = status.length > 0;
 
         this._fetchAfterSwitch();
+    }
+
+    _adoptIdentity(identity) {
+        this._identity = identity;
+        this._identityAdopted = true;
     }
 
     /* `force` skips an active backoff, on the same grounds as the refresh
@@ -306,11 +320,19 @@ class ClaudeMonitorIndicator extends PanelMenu.Button {
      * throttle. The backoff state itself is left alone — fetchLive resets it on
      * success. `notOlderThanMs: 0` because nothing is on screen to protect. */
     _fetchAfterSwitch() {
-        const generation = ++this._generation;
+        /* Bump both: the render generation so an older in-flight refresh cannot
+         * overwrite this, and the switch token, which is what this fetch
+         * actually guards on. */
+        this._generation++;
+        const switchGeneration = ++this._switchGeneration;
 
         Usage.fetchUsage({ force: true, notOlderThanMs: 0 }).then(result => {
-            if (this._destroyed || generation !== this._generation)
+            if (this._destroyed || switchGeneration !== this._switchGeneration)
                 return;
+            /* Re-adopt: the account may have moved again while this was in
+             * flight, and rendering under a stale adopted identity would show
+             * a third account's numbers until the next read corrected it. */
+            this._adoptIdentity(result.identity);
             this._render(result);
         }).catch(error => {
             logError(error, 'claude-monitor: post-switch refresh failed');
@@ -334,14 +356,17 @@ class ClaudeMonitorIndicator extends PanelMenu.Button {
             if (this._destroyed || generation !== this._generation)
                 return;
 
-            /* Checked ahead of `skip`, because a cache-only read with nothing
+            /* Decided ahead of `skip`, because a cache-only read with nothing
              * to render is exactly how a fresh login arrives: new identity,
              * and the previous account's cache gone or disowned. */
-            if (Usage.identityChanged(this._identity, result.identity)) {
+            const transition = Usage.identityTransition(
+                this._identityAdopted, this._identity, result.identity);
+
+            if (transition === 'switch') {
                 this._onAccountSwitched(result);
                 return;
             }
-            this._identity = result.identity;
+            this._adoptIdentity(result.identity);
 
             /* A cache-only read with nothing cached — leave what's on screen. */
             if (result.skip)

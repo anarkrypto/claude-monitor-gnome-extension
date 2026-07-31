@@ -111,13 +111,25 @@ var accountIdentity = function (oauthAccount) {
     return typeof email === 'string' && email ? email : null;
 };
 
-/* A null `previous` means nothing has been adopted yet — the first read after
- * enable(). Treating that as a switch would make every Shell restart spend a
- * redundant live request. Signing out (`current` null) is a real switch. */
-var identityChanged = function (previous, current) {
-    if (previous === null || previous === undefined)
-        return false;
-    return previous !== current;
+/* What a freshly read identity means for what is currently on screen:
+ *
+ *   'adopt'  — nothing on screen yet; take this identity and render normally
+ *   'same'   — unchanged; carry on
+ *   'switch' — the account changed; clear and refetch
+ *
+ * `hasAdopted` is separate from `adopted` because null is a legitimate adopted
+ * value: it is the signed-out state. Conflating "nothing adopted yet" with
+ * "adopted null" meant a logout made the following login read as a first-ever
+ * read, and it went unnoticed until the next poll.
+ *
+ * This decision lives here rather than in indicator.js so it can be tested
+ * under plain gjs — indicator.js needs St and a running Shell. */
+var identityTransition = function (hasAdopted, adopted, current) {
+    if (!hasAdopted)
+        return 'adopt';
+    if (adopted === current)
+        return 'same';
+    return 'switch';
 };
 
 /* Whether a cached utilization block belongs to the account currently signed
