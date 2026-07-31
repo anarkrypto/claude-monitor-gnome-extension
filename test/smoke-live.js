@@ -32,6 +32,7 @@ function describe(name, slot) {
 Usage.fetchUsage().then(result => {
     print('');
     print(`  email                ${result.email || '—'}`);
+    print(`  identity             ${result.identity || '—'}`);
     print(`  source               ${result.source || 'none'}`);
     print(`  error                ${result.error || 'none'}`);
     if (result.source === 'cache')

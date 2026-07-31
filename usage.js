@@ -437,9 +437,16 @@ var fetchLive = function (token) {
  * ------------------------------------------------------------------ */
 
 /* Resolves to:
- *   { email, usage: {session, weekAll, weekFable} | null,
+ *   { email, identity, usage: {session, weekAll, weekFable} | null,
  *     source: 'live' | 'cache' | null, ageMs, retryInMs,
  *     error: null | Err.* }
+ *
+ * or, when a cache-only read has nothing worth rendering:
+ *   { skip: true, identity, email }
+ *
+ * `identity` is on both shapes deliberately. A fresh login arrives as exactly
+ * the second one — new identity, no usable cache — so a caller that only reads
+ * identity off the rendering shape would never see the switch.
  *
  * Never rejects — the indicator always gets something to render.
  *
@@ -470,6 +477,7 @@ var fetchUsage = function ({
             if (cached) {
                 return {
                     email: account.email,
+                    identity: account.identity,
                     usage: cached,
                     source: 'cache',
                     ageMs: Math.max(0, nowMs - account.cachedAtMs),
@@ -479,6 +487,7 @@ var fetchUsage = function ({
             }
             return {
                 email: account.email,
+                identity: account.identity,
                 usage: null,
                 source: null,
                 ageMs: 0,
@@ -489,12 +498,20 @@ var fetchUsage = function ({
 
         if (cacheOnly) {
             const cached = parseUtilization(account.cached);
-            if (!cached || !cacheSupersedes(account.cachedAtMs, notOlderThanMs))
-                return { skip: true };
+            if (!cached || !cacheSupersedes(account.cachedAtMs, notOlderThanMs)) {
+                /* Nothing to render — but the identity still travels, because
+                 * this is the shape a fresh login arrives in. */
+                return {
+                    skip: true,
+                    identity: account.identity,
+                    email: account.email,
+                };
+            }
 
             const nowMs = Date.now();
             return {
                 email: account.email,
+                identity: account.identity,
                 usage: cached,
                 source: 'cache',
                 ageMs: Math.max(0, nowMs - account.cachedAtMs),
@@ -516,6 +533,7 @@ var fetchUsage = function ({
 
                 return {
                     email: account.email,
+                    identity: account.identity,
                     usage: result.usage,
                     source: 'live',
                     ageMs: 0,
