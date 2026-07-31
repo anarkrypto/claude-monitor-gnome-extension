@@ -85,6 +85,13 @@ class ClaudeMonitorIndicator extends PanelMenu.Button {
         this._switchGeneration = 0;
         this._switchAttempt = 0;
         this._switchRetryId = 0;
+        /* True for the ladder's whole lifetime, not just while a retry timer is
+         * pending. Deriving it from `_switchRetryId` left four windows per
+         * switch where the status row was unguarded — the initial fetch and
+         * each in-flight attempt, since the timer is zeroed before dispatch —
+         * and the first of them sits immediately after the panel clears,
+         * exactly when someone is most likely to press ⟳. */
+        this._switchLadderActive = false;
 
         this._buildPanel(extensionPath);
         this._buildMenu();
@@ -256,11 +263,13 @@ class ClaudeMonitorIndicator extends PanelMenu.Button {
      * longer needs to be reported here as if it were a fault — serving the
      * cache is the normal path, not a degraded one. */
     _statusText(result) {
-        /* While a post-switch retry is pending, the ladder owns this row. The
-         * error it is retrying is not the truth yet, and an ordinary refresh
-         * landing mid-ladder must not replace "Loading…" with a fault message
-         * the user would act on right after a successful login. */
-        if (this._switchRetryId)
+        /* While a post-switch ladder is running, it owns this row. The error it
+         * is retrying is not the truth yet, and an ordinary refresh landing
+         * mid-ladder must not replace "Loading…" with a fault message the user
+         * would act on right after a successful login. The guard is the ladder
+         * flag rather than a pending timer, because for most of the ladder's
+         * life there is no timer — only a request in flight. */
+        if (this._switchLadderActive)
             return SWITCH_STATUS;
 
         if (!result.error || !ERROR_TEXT[result.error])
@@ -306,8 +315,12 @@ class ClaudeMonitorIndicator extends PanelMenu.Button {
     _onAccountSwitched(result) {
         this._adoptIdentity(result.identity);
         /* A second switch part-way through the first one's ladder. */
-        this._cancelSwitchRetry();
-        this._switchAttempt = 0;
+        this._endSwitchLadder();
+
+        /* Before the render: from here until _fetchAfterSwitch reaches its
+         * terminal path there are no fresh numbers on screen, and any refresh
+         * landing in between is describing the account we just left. */
+        this._switchLadderActive = true;
 
         this._render({
             email: result.email,
@@ -361,9 +374,9 @@ class ClaudeMonitorIndicator extends PanelMenu.Button {
 
             /* Only a post-switch 401 or a momentarily-missing token earns a
              * retry, and only a bounded one. `_statusText` keeps the row on
-             * "Loading…" for as long as `_switchRetryId` is set, so neither
-             * this fault nor an ordinary refresh landing mid-ladder can
-             * surface it early. */
+             * "Loading…" for as long as `_switchLadderActive` is set, so
+             * neither this fault nor an ordinary refresh landing mid-ladder
+             * can surface it early. */
             const retryDelayMs = Usage.switchRetryDelayMs(
                 result.error, this._switchAttempt, result.identity);
 
@@ -380,9 +393,11 @@ class ClaudeMonitorIndicator extends PanelMenu.Button {
                 return;
             }
 
-            /* The ladder is over either way — reset so the field is sane at
-             * rest rather than only at the next switch. */
-            this._switchAttempt = 0;
+            /* The ladder is over either way, and this has to happen before the
+             * render: _statusText holds the row on "Loading…" for as long as
+             * the ladder is running, so leaving the flag up here would hide the
+             * very error the ladder just gave up on. */
+            this._endSwitchLadder();
 
             /* Re-adopt: the account may have moved again while this was in
              * flight, and rendering under a stale adopted identity would show
@@ -396,6 +411,17 @@ class ClaudeMonitorIndicator extends PanelMenu.Button {
         }).catch(error => {
             logError(error, 'claude-monitor: post-switch refresh failed');
         });
+    }
+
+    /* Everything that ends a ladder, in one place: the pending retry if there
+     * is one, the attempt counter, and the flag the status row guards on.
+     * Every terminal path goes through here — the ladder giving up, a second
+     * switch starting a new one, a switch that already has live data, and
+     * destroy — so the flag can never outlive the thing it describes. */
+    _endSwitchLadder() {
+        this._cancelSwitchRetry();
+        this._switchAttempt = 0;
+        this._switchLadderActive = false;
     }
 
     _cancelSwitchRetry() {
@@ -466,7 +492,7 @@ class ClaudeMonitorIndicator extends PanelMenu.Button {
         this._stopAgeTicker();
         /* A pending retry outliving the indicator would fire into a destroyed
          * actor. */
-        this._cancelSwitchRetry();
+        this._endSwitchLadder();
         super.destroy();
     }
 });
