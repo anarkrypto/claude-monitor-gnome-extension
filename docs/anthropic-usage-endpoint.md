@@ -115,6 +115,64 @@ a result.
 
 ---
 
+## The local cache
+
+`cachedUsageUtilization` is not just a number and a timestamp. Its stored
+shape, read off the same write path quoted above, is:
+
+```
+{ fetchedAtMs, accountUuid?, utilization }
+```
+
+`accountUuid` is genuinely optional in Claude Code's own schema — the write
+path only spreads it onto the record when the signed-in account has one
+(`...r !== void 0 && {accountUuid: r}`). An unstamped cache is not malformed
+data; it is what the schema allows, which is why this extension treats one as
+belonging to whoever is signed in rather than as untrustworthy.
+
+Ownership is checked on read, not on write — and only there. The read
+function compares the cache's `accountUuid` against whoever is signed in now,
+and drops the whole entry on a mismatch:
+
+```js
+// read path — deletes the cache outright if it is stamped for someone else
+if (t.data.accountUuid !== dc()?.accountUuid)
+    return hr(n => ({...n, cachedUsageUtilization: void 0})), null;
+```
+
+That check fires the next time Claude Code *reads* the cache, not the moment
+the account changes. In the gap between a switch and that next read,
+`~/.claude.json` can legitimately hold the new account's `oauthAccount` right
+next to the old account's `cachedUsageUtilization` — the file is briefly
+self-inconsistent by design, not by bug. That gap is the whole reason this
+extension carries its own ownership check instead of trusting the file to
+already be clean by the time it reads it.
+
+Logout is handled differently: `cachedUsageUtilization` is cleared in the same
+state update that clears `oauthAccount`, not lazily on the next read —
+
+```js
+s.oauthAccount = void 0, /* … */ s.cachedUsageUtilization = void 0, s
+```
+
+— so there is no equivalent gap on sign-out. The gap exists only when signing
+in as a different account, which is exactly when it matters least to Claude
+Code and most to a panel that renders numbers next to an email address.
+
+All three of the above — the record's shape, the lazy read-time ownership
+check, and the logout clear — were read out of the shipped Claude Code binary
+at **version 2.1.220**, the same way the cadence constants above were: none of
+it is public API, and it may have changed by the time you read this. Re-check
+it rather than trust it.
+
+The binary is an ELF executable with the JS bundled straight into it, not a
+text file. A plain `grep cachedUsageUtilization <binary>` reports no matches
+and looks like proof the key doesn't exist — it isn't; grep just refuses to
+search binary data unless told to with `-a`, as the reproduction command above
+already does.
+
+---
+
 ## What the official docs do apply
 
 Three things from the [Messages API rate-limit

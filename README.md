@@ -105,6 +105,31 @@ expires it says so and falls back to the cache rather than attempting a refresh
 itself; rewriting `.credentials.json` from outside Claude Code risks corrupting
 the session. Use **Switch Account** to sign in again.
 
+### Account switching
+
+A switch is detected from `~/.claude.json` within a couple of seconds — the
+file watcher's 2 second debounce — however it was performed: the **Switch
+Account** button above, `claude auth login` run in any terminal, or `/login`
+inside Claude Code itself. Signing out, and signing out then straight back in
+as someone else, are both handled the same way; the second is worth calling
+out because it's an ordinary way to change accounts, not an edge case.
+
+On a switch the panel clears to `— | —` and shows the new email immediately,
+rather than holding the previous account's numbers until fresh ones arrive.
+The panel is read at a glance, and a wrong number read at a glance is worse
+than an em dash. Holding also has the worse failure mode: going offline
+mid-switch would strand one account's usage sitting under another account's
+name, with nothing on screen to say so. For the same reason, a usage cache
+left over from a different account is ignored rather than shown — see
+[`docs/anthropic-usage-endpoint.md`](docs/anthropic-usage-endpoint.md) for why
+one can be sitting on disk at all.
+
+Immediately after a switch the extension retries briefly — at 2s, 5s, then
+10s — if the new account's token hasn't been written to disk yet, so a
+successful login never gets reported as "Token expired" or "Not signed in" as
+if it were a fault. A genuine sign-out isn't retried: "Not signed in" shows up
+immediately, because there is no token to wait for.
+
 ## Changing the icon colour
 
 The panel icon uses the Claude brand orange, `#D97757`. It is set in **two**
