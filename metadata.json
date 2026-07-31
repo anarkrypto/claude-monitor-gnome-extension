@@ -1,0 +1,8 @@
+{
+  "uuid": "claude-monitor@anarkrypto",
+  "name": "Claude Monitor",
+  "description": "Shows Claude Code session and weekly usage limits in the top bar.",
+  "shell-version": ["42"],
+  "url": "https://github.com/anarkrypto/claude-monitor",
+  "version": 1
+}

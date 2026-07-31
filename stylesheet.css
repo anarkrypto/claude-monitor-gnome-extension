@@ -1,0 +1,81 @@
+/* Panel button */
+
+.claude-monitor-box {
+    spacing: 4px;
+}
+
+/* St tints "-symbolic.svg" icons with this property, overriding the fill in
+ * the file itself — so this is what actually colours the panel icon. Same
+ * value as the fill in icons/claude-monitor-symbolic.svg; change both. */
+.claude-monitor-box .system-status-icon {
+    color: #D97757;
+}
+
+.claude-monitor-sep {
+    color: rgba(255, 255, 255, 0.4);
+}
+
+/* Severity colours, shared by the panel and the dropdown.
+ * > 90 crit, > 60 warn, otherwise ok. */
+
+.claude-monitor-value-ok {
+    color: #57e389;
+}
+
+.claude-monitor-value-warn {
+    color: #f8e45c;
+}
+
+.claude-monitor-value-crit {
+    color: #ff7b63;
+}
+
+.claude-monitor-value-none {
+    color: rgba(255, 255, 255, 0.5);
+}
+
+/* Dropdown */
+
+.claude-monitor-email {
+    font-weight: bold;
+}
+
+/* Permanent, not a warning — how old the displayed numbers are. */
+.claude-monitor-age {
+    color: rgba(255, 255, 255, 0.5);
+    font-size: 0.85em;
+    padding: 0 0.8em;
+}
+
+.claude-monitor-icon-button {
+    padding: 4px;
+    border-radius: 99px;
+    color: rgba(255, 255, 255, 0.7);
+}
+
+.claude-monitor-icon-button:hover,
+.claude-monitor-icon-button:focus {
+    background-color: rgba(255, 255, 255, 0.12);
+    color: #ffffff;
+}
+
+/* min-width keeps the three columns aligned even when a row has no reset
+ * time, and the padding stops a long label touching the reset text. */
+.claude-monitor-dim {
+    color: rgba(255, 255, 255, 0.55);
+    font-size: 0.9em;
+    min-width: 9em;
+    padding: 0 1.2em;
+    text-align: right;
+}
+
+.claude-monitor-menu-value {
+    min-width: 3em;
+    text-align: right;
+}
+
+.claude-monitor-status {
+    color: #f8e45c;
+    font-size: 0.9em;
+    max-width: 22em;
+}
