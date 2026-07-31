@@ -22,6 +22,13 @@ const AGE_TICK_SECONDS = 15;
  * entry in ERROR_TEXT: it is a transient state, not a fault. */
 const SWITCH_STATUS = 'Loading usage for the new account…';
 
+/* ~/.claude.json and ~/.claude/.credentials.json are written separately, so a
+ * switch can present a new email alongside the old token. Firing once would
+ * report "Token expired" immediately after a successful login. Worst case is
+ * three extra requests, only ever on a switch — a ladder rather than a second
+ * file watcher because it self-corrects whichever file lands first. */
+const SWITCH_RETRY_DELAYS_MS = [2000, 5000, 10000];
+
 const ERROR_TEXT = {
     'no-auth': 'Not signed in — use Switch Account to sign in',
     'expired': 'Token expired — sign in again to refresh it',
@@ -78,6 +85,8 @@ class ClaudeMonitorIndicator extends PanelMenu.Button {
          * a post-switch fetch. An ordinary cache-only read superseding it left
          * the panel stranded under a "Loading…" status with nothing in flight. */
         this._switchGeneration = 0;
+        this._switchAttempt = 0;
+        this._switchRetryId = 0;
 
         this._buildPanel(extensionPath);
         this._buildMenu();
@@ -291,6 +300,9 @@ class ClaudeMonitorIndicator extends PanelMenu.Button {
      * nothing indicating it. */
     _onAccountSwitched(result) {
         this._adoptIdentity(result.identity);
+        /* A second switch part-way through the first one's ladder. */
+        this._cancelSwitchRetry();
+        this._switchAttempt = 0;
 
         this._render({
             email: result.email,
@@ -329,6 +341,24 @@ class ClaudeMonitorIndicator extends PanelMenu.Button {
         Usage.fetchUsage({ force: true, notOlderThanMs: 0 }).then(result => {
             if (this._destroyed || switchGeneration !== this._switchGeneration)
                 return;
+
+            /* Only a post-switch 401 earns a retry, and only a bounded one.
+             * The status row keeps saying "Loading…" meanwhile, because a
+             * token that has not been written yet is not an expired token. */
+            if (result.error === Usage.Err.EXPIRED &&
+                this._switchAttempt < SWITCH_RETRY_DELAYS_MS.length) {
+                const delayMs = SWITCH_RETRY_DELAYS_MS[this._switchAttempt];
+                this._switchAttempt++;
+
+                this._switchRetryId = GLib.timeout_add(
+                    GLib.PRIORITY_DEFAULT, delayMs, () => {
+                        this._switchRetryId = 0;
+                        this._fetchAfterSwitch();
+                        return GLib.SOURCE_REMOVE;
+                    });
+                return;
+            }
+
             /* Re-adopt: the account may have moved again while this was in
              * flight, and rendering under a stale adopted identity would show
              * a third account's numbers until the next read corrected it. */
@@ -337,6 +367,13 @@ class ClaudeMonitorIndicator extends PanelMenu.Button {
         }).catch(error => {
             logError(error, 'claude-monitor: post-switch refresh failed');
         });
+    }
+
+    _cancelSwitchRetry() {
+        if (this._switchRetryId) {
+            GLib.Source.remove(this._switchRetryId);
+            this._switchRetryId = 0;
+        }
     }
 
     refresh({ force = false, cacheOnly = false } = {}) {
@@ -380,6 +417,9 @@ class ClaudeMonitorIndicator extends PanelMenu.Button {
     destroy() {
         this._destroyed = true;
         this._stopAgeTicker();
+        /* A pending retry outliving the indicator would fire into a destroyed
+         * actor. */
+        this._cancelSwitchRetry();
         super.destroy();
     }
 });
