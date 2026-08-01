@@ -313,6 +313,37 @@ var cacheFloor = function (displayedAtMs, switchedAtMs) {
         Number.isFinite(switched) && switched > 0 ? switched : 0);
 };
 
+/* Whether an in-flight refresh has been overtaken and must not render.
+ *
+ * The two counters are not interchangeable, and collapsing them into one is
+ * what made the panel go quietly stale. A cache-only read resolves to nothing
+ * to render whenever the cache is no fresher than what is on screen — which is
+ * most of the time, since the file watcher fires one on every write to
+ * ~/.claude.json and most of those have nothing to do with usage. Letting one
+ * cancel a live fetch therefore threw away the only result that would have
+ * rendered, and rendered nothing in its place: the panel then held the same
+ * numbers for a whole poll interval with no error and no request in flight,
+ * which is indistinguishable from the extension having died. This is the
+ * ordinary path's version of the hazard `_switchGeneration` already exists for.
+ *
+ * So `live` counts only the refreshes that reach the API, and a live fetch
+ * guards on that. The asymmetry runs one way only: a cache-only read still has
+ * to be cancellable by a live one, because it captured `notOlderThanMs` when it
+ * started and that floor goes stale the moment fresher numbers land — without
+ * that, a late cache read could render older numbers over newer ones, which is
+ * the bug cacheSupersedes exists to prevent.
+ *
+ * Lives here rather than in indicator.js so the harness can cover it —
+ * indicator.js needs St and a running Shell. */
+var refreshSuperseded = function (cacheOnly, started, current) {
+    if (!started || !current)
+        return false;
+
+    return cacheOnly
+        ? started.all !== current.all
+        : started.live !== current.live;
+};
+
 var formatAge = function (ageMs) {
     const minutes = Math.floor(ageMs / 60000);
     if (minutes < 1)

@@ -62,8 +62,14 @@ class ClaudeMonitorIndicator extends PanelMenu.Button {
         super._init(0.0, 'Claude Monitor');
 
         this._destroyed = false;
-        /* Guards against a slow request landing after a newer one. */
+        /* Guards against a slow request landing after a newer one. Counted
+         * twice on purpose: `_generation` moves for every refresh, while
+         * `_liveGeneration` moves only for the ones that reach the API, so a
+         * cache-only read cannot cancel a live fetch that would have rendered.
+         * See Usage.refreshSuperseded for why that asymmetry is the whole
+         * point. */
         this._generation = 0;
+        this._liveGeneration = 0;
         /* When the displayed numbers were obtained, absolute so the age label
          * keeps counting up between renders. */
         this._dataTimestampMs = null;
@@ -352,10 +358,15 @@ class ClaudeMonitorIndicator extends PanelMenu.Button {
      * switch floor is what protects this one, since an offline fetch here would
      * otherwise fall back to the cache of the account we just left. */
     _fetchAfterSwitch() {
-        /* Bump both: the render generation so an older in-flight refresh cannot
-         * overwrite this, and the switch token, which is what this fetch
-         * actually guards on. */
+        /* Bump all three: both render generations, so no older in-flight
+         * refresh can overwrite this, and the switch token, which is what this
+         * fetch actually guards on. `_liveGeneration` matters as much as
+         * `_generation` here — a live poll for the account we just left is
+         * exactly the request that must not be allowed to land, and it is the
+         * one refreshSuperseded now shields from everything but a newer live
+         * fetch. */
         this._generation++;
+        this._liveGeneration++;
         const switchGeneration = ++this._switchGeneration;
 
         Usage.fetchUsage({
@@ -443,7 +454,13 @@ class ClaudeMonitorIndicator extends PanelMenu.Button {
         if (this._destroyed)
             return;
 
-        const generation = ++this._generation;
+        const started = {
+            all: ++this._generation,
+            /* A cache-only read takes the current value without claiming a new
+             * one: it must not make a live fetch already in flight look
+             * overtaken. */
+            live: cacheOnly ? this._liveGeneration : ++this._liveGeneration,
+        };
 
         Usage.fetchUsage({
             force,
@@ -456,7 +473,11 @@ class ClaudeMonitorIndicator extends PanelMenu.Button {
         }).then(result => {
             /* The extension may have been disabled, or a newer refresh may
              * have overtaken this one, while the request was in flight. */
-            if (this._destroyed || generation !== this._generation)
+            const current = {
+                all: this._generation,
+                live: this._liveGeneration,
+            };
+            if (this._destroyed || Usage.refreshSuperseded(cacheOnly, started, current))
                 return;
 
             /* Decided ahead of `skip`, because a cache-only read with nothing

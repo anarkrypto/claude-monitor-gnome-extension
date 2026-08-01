@@ -148,6 +148,40 @@ check('cache: a garbage timestamp never wins',
 check('cache: a garbage displayed timestamp is treated as nothing displayed',
     Usage.cacheSupersedes(T_NOW, 'nope'), true);
 
+/* --- a cache-only read may not cancel a live fetch --------------------- */
+
+/* Regression: every refresh bumped one shared generation counter, and a
+ * result whose generation had moved on was dropped without rendering. A
+ * cache-only read resolves to nothing to render whenever the cache is no
+ * fresher than the panel — which is most of the time — so when one landed
+ * during a live poll it cancelled it and rendered nothing itself. The panel
+ * then sat unchanged for a whole poll interval with no error and no request in
+ * flight, which reads exactly like the extension having quietly died.
+ *
+ * The file watcher fires a cache-only read on every write to ~/.claude.json
+ * (measured: every 30-90s during active use, and every few seconds in a
+ * burst), against a live poll whose window was measured at 0.33-0.49s warm and
+ * 2.27s on a cold connection. This is the ordinary path's version of the
+ * hazard `_switchGeneration` already exists for. */
+
+const GEN = { all: 7, live: 3 };
+
+check('guard: a live fetch survives a cache-only read starting after it',
+    Usage.refreshSuperseded(false, GEN, { all: 9, live: 3 }), false);
+check('guard: a live fetch is cancelled by a newer live fetch',
+    Usage.refreshSuperseded(false, GEN, { all: 9, live: 4 }), true);
+check('guard: an unovertaken live fetch renders',
+    Usage.refreshSuperseded(false, GEN, GEN), false);
+
+/* The asymmetry runs one way only. A cache-only read captured notOlderThanMs
+ * when it started, so fresher numbers landing since make its floor stale. */
+check('guard: a cache-only read is cancelled by a live fetch',
+    Usage.refreshSuperseded(true, GEN, { all: 8, live: 4 }), true);
+check('guard: a cache-only read is cancelled by a newer cache-only read',
+    Usage.refreshSuperseded(true, GEN, { all: 8, live: 3 }), true);
+check('guard: an unovertaken cache-only read renders',
+    Usage.refreshSuperseded(true, GEN, GEN), false);
+
 /* --- a switch is a floor no cache may be served from under ------------ */
 
 /* accountIdentity pins the organisation on purpose — the same account moved
