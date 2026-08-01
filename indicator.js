@@ -22,9 +22,17 @@ const AGE_TICK_SECONDS = 15;
  * entry in ERROR_TEXT: it is a transient state, not a fault. */
 const SWITCH_STATUS = 'Loading usage for the new account…';
 
+/* `expired` deliberately does not say "sign in again". A dead access token
+ * beside a live refresh token is not a signed-out user: Claude Code mints a new
+ * one on its next call, and the panel picks it up within a debounce of the
+ * write (see Usage.watchToken). Telling someone to re-authenticate would be
+ * asking them to do by hand something that is about to happen by itself — and
+ * it is the state a machine wakes up in after any long suspend, so it is the
+ * message most likely to be read. The case where signing in really is the only
+ * way back reaches `no-auth` instead: see Usage.tokenState. */
 const ERROR_TEXT = {
     'no-auth': 'Not signed in — use Switch Account to sign in',
-    'expired': 'Token expired — sign in again to refresh it',
+    'expired': 'Token expired — run Claude to refresh it',
     'offline': 'Usage API unreachable',
     'rate-limited': 'Rate limited by the usage API',
 };
@@ -73,6 +81,10 @@ class ClaudeMonitorIndicator extends PanelMenu.Button {
         /* When the displayed numbers were obtained, absolute so the age label
          * keeps counting up between renders. */
         this._dataTimestampMs = null;
+        /* The fault currently on screen, or null. Read only by the token
+         * watcher, to tell the one state a new token can fix from the several
+         * it cannot. */
+        this._displayedError = null;
         this._ageTickId = 0;
         /* The account the numbers on screen belong to, and whether anything
          * has been adopted at all — null is a real value here, it means
@@ -295,6 +307,8 @@ class ClaudeMonitorIndicator extends PanelMenu.Button {
         const nowMs = Date.now();
         const usage = result.usage;
 
+        this._displayedError = result.error || null;
+
         this._setValue(this._sessionLabel, usage ? usage.session : null);
         this._setValue(this._weekLabel, usage ? usage.weekAll : null);
 
@@ -448,6 +462,29 @@ class ClaudeMonitorIndicator extends PanelMenu.Button {
             GLib.Source.remove(this._switchRetryId);
             this._switchRetryId = 0;
         }
+    }
+
+    /* ~/.claude/.credentials.json changed — Claude Code has minted a new token.
+     *
+     * This is the only event that ends an auth fault, and before it was watched
+     * the panel's only way out of one was the 300s poll: the account watcher
+     * fires a cache-only read, which never contacts the API and so can never
+     * clear a fault. Measured 2026-08-01: a fresh token landed at 11:55:41 and
+     * the panel stayed wrong until the poll at 11:57:33.
+     *
+     * Not forced. If the panel were showing a fault it is right to spend a
+     * request on, backoff cannot be active — an active backoff short-circuits
+     * fetchUsage into rate-limited long before it reads a token, so that is the
+     * error that would be on screen, and tokenChangeWarrantsFetch refuses it. */
+    onTokenChanged() {
+        if (this._destroyed)
+            return;
+
+        if (!Usage.tokenChangeWarrantsFetch(
+            this._displayedError, this._switchLadderActive))
+            return;
+
+        this.refresh();
     }
 
     refresh({ force = false, cacheOnly = false } = {}) {

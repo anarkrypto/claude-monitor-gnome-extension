@@ -21,7 +21,8 @@ const REFRESH_JITTER = 0.1;
 
 let indicator = null;
 let timeoutId = 0;
-let watcher = null;
+let accountWatcher = null;
+let tokenWatcher = null;
 
 /* Spread the poll across a window so that many machines — or one machine
  * restarting its Shell — don't converge on the same second. */
@@ -53,13 +54,24 @@ function enable() {
      * happens to write one. It fires on every write to the file, most of which
      * have nothing to do with usage — fetchUsage's staleness guard is what
      * stops those from overwriting fresher data. */
-    watcher = Usage.watchAccount(() => indicator.refresh({ cacheOnly: true }));
+    accountWatcher = Usage.watchAccount(() => indicator.refresh({ cacheOnly: true }));
+
+    /* Not opportunistic — corrective. The watcher above reads the cache and
+     * nothing else, so it cannot clear an auth fault however often it fires;
+     * a new token is what clears one, and this is where a new token appears.
+     * The indicator decides whether the write is worth a request. */
+    tokenWatcher = Usage.watchToken(() => indicator.onTokenChanged());
 }
 
 function disable() {
-    if (watcher) {
-        watcher.cancel();
-        watcher = null;
+    if (accountWatcher) {
+        accountWatcher.cancel();
+        accountWatcher = null;
+    }
+
+    if (tokenWatcher) {
+        tokenWatcher.cancel();
+        tokenWatcher = null;
     }
 
     if (timeoutId) {

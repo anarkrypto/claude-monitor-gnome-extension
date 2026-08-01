@@ -71,6 +71,10 @@ gnome-extensions enable claude-monitor@anarkrypto
    watches this file and picks up a newer value for free when one appears — but
    only when it is **strictly newer** than what's already displayed, because
    Claude Code rewrites the file constantly for unrelated reasons.
+3. **`~/.claude/.credentials.json`** → the OAuth token, and what it says about
+   itself. This file is watched too, for a different reason: it carries no usage
+   data, but a write to it is the one event that can end an authentication
+   fault. See [The token, and mornings](#the-token-and-mornings).
 
 The header shows how old the displayed numbers are (`updated 2m ago`). If
 neither source is available the panel shows `— | —`.
@@ -103,7 +107,37 @@ all — are in [`docs/anthropic-usage-endpoint.md`](docs/anthropic-usage-endpoin
 **The extension never writes to your Claude Code files.** When the OAuth token
 expires it says so and falls back to the cache rather than attempting a refresh
 itself; rewriting `.credentials.json` from outside Claude Code risks corrupting
-the session. Use **Switch Account** to sign in again.
+the session.
+
+### The token, and mornings
+
+The access token lives **8 hours**. A machine that suspends overnight therefore
+wakes up with a dead one, and this is the single most likely fault to be on
+screen — it is what the first refresh after unlock finds.
+
+Two things follow from *not* refreshing the token ourselves:
+
+- **The panel reads the expiry instead of discovering it.** `expiresAt` is right
+  there in the file, so an expired token is reported as expired without spending
+  a request to be told `401`. A missing or malformed expiry field is treated as
+  no information and the token is sent anyway — refusing to ask because a field
+  we don't own changed shape would be a much worse failure than one wasted
+  request.
+- **It waits for the fix rather than asking you to perform it.** A dead access
+  token sitting beside a live refresh token is not a signed-out session: Claude
+  Code mints a new one on its next call. So the status row says *"Token expired
+  — run Claude to refresh it"*, and the extension watches
+  `~/.claude/.credentials.json` so the panel recovers within the watcher's 2
+  second debounce of that happening, instead of waiting up to 5 minutes for the
+  next poll. Only when the **refresh** token is dead too does it say *"Not
+  signed in"* and point you at **Switch Account** — that is the one case where
+  signing in again is genuinely the way back.
+
+A write to the credentials file only costs a request when there is an
+authentication fault on screen for a new token to fix. Claude Code rotates the
+token every few hours regardless, and paying a request per rotation would buy
+nothing the poll isn't already delivering — and on a throttled panel it would do
+active harm.
 
 ### Account switching
 
@@ -159,7 +193,7 @@ panel foreground instead, like a standard status icon, delete the CSS rule.
 | `usage.js` | Token, API call, cache fallback, parsing — no St/Shell |
 | `login.js` | Finds a terminal and runs `claude auth login` — no St/Shell |
 | `indicator.js` | Panel button and dropdown |
-| `extension.js` | Lifecycle, the 5 minute poll, the file watcher |
+| `extension.js` | Lifecycle, the 5 minute poll, the two file watchers |
 
 ## Tests
 
@@ -167,7 +201,7 @@ panel foreground instead, like a standard status icon, delete the CSS rule.
 `gjs`:
 
 ```sh
-gjs test/run-tests.js    # 205 assertions, no network, no credentials
+gjs test/run-tests.js    # 248 assertions, no network, no credentials
 gjs test/smoke-live.js   # real end-to-end run: prints what the panel would show
 ```
 

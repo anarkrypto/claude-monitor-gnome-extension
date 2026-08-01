@@ -352,6 +352,122 @@ check('ladder: a negative attempt is not retried',
 check('ladder: a non-integer attempt is not retried',
     Usage.switchRetryDelayMs(Usage.Err.EXPIRED, 1.5, SWITCHED_TO), null);
 
+/* --- what the credentials file says before we spend a request ---------- */
+
+/* The access token lives 8 hours. A machine that suspends overnight therefore
+ * wakes with a dead one, and the first poll after unlock spent a request to be
+ * told so — measured 2026-08-01 11:52:38, `http #18 status=401`. The file
+ * already carried the answer: `expiresAt`, and a `refreshToken` next to it.
+ *
+ * The two outcomes are not the same fault. A dead access token beside a live
+ * refresh token is not a signed-out user — Claude Code mints a new one on its
+ * next call, and the panel only has to wait. A dead refresh token is the one
+ * that actually needs a person. */
+
+const T_TOKEN = Date.parse('2026-08-01T12:00:00Z');
+const AN_HOUR = 3600 * 1000;
+
+function credential(overrides) {
+    const oauth = {
+        accessToken: 'access',
+        refreshToken: 'refresh',
+        expiresAt: T_TOKEN + AN_HOUR,
+        refreshTokenExpiresAt: T_TOKEN + 30 * 24 * AN_HOUR,
+    };
+    for (const key in overrides)
+        oauth[key] = overrides[key];
+    return oauth;
+}
+
+check('token: a token still inside its lifetime is usable',
+    Usage.tokenState(credential({}), T_TOKEN), 'usable');
+check('token: a dead access token with a live refresh token is expired',
+    Usage.tokenState(credential({ expiresAt: T_TOKEN - 1 }), T_TOKEN), 'expired');
+/* The boundary belongs to the dead side: a token that expires this instant is
+ * not one to send. */
+check('token: expiry exactly now is expired',
+    Usage.tokenState(credential({ expiresAt: T_TOKEN }), T_TOKEN), 'expired');
+
+/* This is the distinction the status row needs: only here is "sign in again"
+ * the right thing to tell someone. */
+check('token: both tokens dead is signed out',
+    Usage.tokenState(credential({
+        expiresAt: T_TOKEN - 1,
+        refreshTokenExpiresAt: T_TOKEN - 1,
+    }), T_TOKEN), 'signed-out');
+check('token: an expired token with no refresh token is signed out',
+    Usage.tokenState(credential({ expiresAt: T_TOKEN - 1, refreshToken: '' }), T_TOKEN),
+    'signed-out');
+check('token: a refresh token with no stated expiry is not condemned',
+    Usage.tokenState(credential({
+        expiresAt: T_TOKEN - 1,
+        refreshTokenExpiresAt: undefined,
+    }), T_TOKEN), 'expired');
+
+/* Fail open on anything unreadable in the expiry fields. Refusing to send a
+ * token because a field we do not own changed shape would turn a working panel
+ * into a fault message, which is a far worse failure than one wasted request. */
+check('token: a missing expiresAt is no information, so send it',
+    Usage.tokenState({ accessToken: 'access' }, T_TOKEN), 'usable');
+check('token: a garbage expiresAt is no information',
+    Usage.tokenState(credential({ expiresAt: 'nope' }), T_TOKEN), 'usable');
+check('token: a zero expiresAt is no information',
+    Usage.tokenState(credential({ expiresAt: 0 }), T_TOKEN), 'usable');
+check('token: a garbage refreshTokenExpiresAt does not condemn it',
+    Usage.tokenState(credential({
+        expiresAt: T_TOKEN - 1,
+        refreshTokenExpiresAt: 'nope',
+    }), T_TOKEN), 'expired');
+
+check('token: no access token is signed out',
+    Usage.tokenState({ refreshToken: 'refresh' }, T_TOKEN), 'signed-out');
+check('token: an empty access token is signed out',
+    Usage.tokenState(credential({ accessToken: '' }), T_TOKEN), 'signed-out');
+check('token: a non-string access token is signed out',
+    Usage.tokenState(credential({ accessToken: 42 }), T_TOKEN), 'signed-out');
+check('token: no oauth record at all', Usage.tokenState(null, T_TOKEN), 'signed-out');
+check('token: undefined', Usage.tokenState(undefined, T_TOKEN), 'signed-out');
+check('token: garbage', Usage.tokenState('nope', T_TOKEN), 'signed-out');
+
+/* --- a new token on disk is what ends an auth fault -------------------- */
+
+/* Regression, measured 2026-08-01: the panel read "Token expired" from
+ * 11:52:38. Claude Code wrote a fresh token to ~/.claude/.credentials.json at
+ * 11:55:41.549 — the fault was over, on disk — and the panel stayed wrong until
+ * the scheduled poll at 11:57:33. 1m52s of it was avoidable.
+ *
+ * Nothing could have shortened it. The only file being watched was
+ * ~/.claude.json, whose callback is a cache-only read: it never contacts the
+ * API, so it is structurally incapable of clearing a fault. It fired at
+ * 11:53:54, 11:55:43 and 11:56:42 and skipped all three.
+ *
+ * So the credentials file earns a watcher of its own — but a request only when
+ * there is a fault for a new token to fix. */
+
+check('token change: an expired token is exactly what a new one fixes',
+    Usage.tokenChangeWarrantsFetch(Usage.Err.EXPIRED, false), true);
+check('token change: so is being signed out — this is how a login lands',
+    Usage.tokenChangeWarrantsFetch(Usage.Err.NO_AUTH, false), true);
+
+/* Claude Code rotates the token every few hours whether the panel is faulted
+ * or not. Spending a request on each rotation would buy nothing the poll is
+ * not already delivering. */
+check('token change: a healthy panel does not need one',
+    Usage.tokenChangeWarrantsFetch(null, false), false);
+check('token change: an unreachable API is not an auth fault',
+    Usage.tokenChangeWarrantsFetch(Usage.Err.OFFLINE, false), false);
+/* And this one is the case where an extra request does active harm. */
+check('token change: a throttled panel is the last thing to spend a request',
+    Usage.tokenChangeWarrantsFetch(Usage.Err.RATE_LIMITED, false), false);
+
+/* The post-switch ladder is already retrying on its own schedule and owns the
+ * status row while it does — a second request racing it would render numbers
+ * under a "Loading…" row it does not control. */
+check('token change: a running switch ladder owns the retry',
+    Usage.tokenChangeWarrantsFetch(Usage.Err.EXPIRED, true), false);
+check('token change: ...even when signed out',
+    Usage.tokenChangeWarrantsFetch(Usage.Err.NO_AUTH, true), false);
+
 /* --- cache ownership --------------------------------------------------- */
 
 /* Claude Code stamps its usage cache with the accountUuid it belongs to, and
@@ -537,6 +653,7 @@ if (iconPixbuf) {
 
 const REAL = {
     accountPath: Usage.accountPath,
+    tokenPath: Usage.tokenPath,
     readAccount: Usage.readAccount,
     readToken: Usage.readToken,
     fetchLive: Usage.fetchLive,
@@ -547,6 +664,7 @@ const REAL = {
  * accountPath) gets it regardless of what ran before. */
 function resetStubs() {
     Usage.accountPath = REAL.accountPath;
+    Usage.tokenPath = REAL.tokenPath;
     Usage.readAccount = REAL.readAccount;
     Usage.readToken = REAL.readToken;
     Usage.fetchLive = REAL.fetchLive;
@@ -584,6 +702,25 @@ function sequence(steps) {
     return steps.reduce((chain, step) => chain.then(() => step()), Promise.resolve());
 }
 
+function waitMs(ms) {
+    return new Promise(resolve => {
+        GLib.timeout_add(GLib.PRIORITY_DEFAULT, ms, () => {
+            resolve();
+            return GLib.SOURCE_REMOVE;
+        });
+    });
+}
+
+/* Claude Code writes both of the files this extension watches by rename, not
+ * in place. A monitor installed on the path rather than on the inode has to
+ * survive that, so the tests replace files the same way. */
+function replaceAtomically(path, text) {
+    const staging = `${path}.staging`;
+    GLib.file_set_contents(staging, text);
+    Gio.File.new_for_path(staging).move(
+        Gio.File.new_for_path(path), Gio.FileCopyFlags.OVERWRITE, null, null);
+}
+
 const A_CACHE_AGE_MS = 10 * 60 * 1000;
 
 function newAccount(overrides) {
@@ -616,7 +753,7 @@ function skipShapeCarriesIdentity() {
 function liveShapeCarriesIdentity() {
     resetStubs();
     Usage.readAccount = () => Promise.resolve(newAccount({}));
-    Usage.readToken = () => Promise.resolve('token');
+    Usage.readToken = () => Promise.resolve({ state: 'usable', token: 'token' });
     Usage.fetchLive = () => Promise.resolve({
         usage: Usage.parseUtilization(Fixtures.LIVE_RESPONSE),
     });
@@ -631,7 +768,7 @@ function liveShapeCarriesIdentity() {
 
 function fallbackShapesCarryIdentity() {
     resetStubs();
-    Usage.readToken = () => Promise.resolve(null);
+    Usage.readToken = () => Promise.resolve({ state: 'signed-out', token: null });
     Usage.readAccount = () => Promise.resolve(newAccount({
         cached: Fixtures.CACHED_UTILIZATION,
         cachedAtMs: Date.now() - A_CACHE_AGE_MS,
@@ -776,7 +913,7 @@ function readAccountReportsUnreadableAsUnknown() {
  * account we had just left. */
 function theFallbackRefusesAPreSwitchCache() {
     resetStubs();
-    Usage.readToken = () => Promise.resolve(null);
+    Usage.readToken = () => Promise.resolve({ state: 'signed-out', token: null });
 
     const cachedAtMs = Date.now() - A_CACHE_AGE_MS;
     const switchedAtMs = cachedAtMs + 60 * 1000;
@@ -833,6 +970,133 @@ function aCacheOnlyReadRefusesAPreSwitchCache() {
         });
 }
 
+/* tokenState is covered as a predicate above. This covers fetchUsage acting on
+ * it against a real credentials file: the whole point is the request that is
+ * never sent, so fetchLive counts its own calls. */
+function anExpiredTokenCostsNoRequest() {
+    resetStubs();
+
+    let dispatched = 0;
+    Usage.readAccount = () => Promise.resolve(newAccount({}));
+    Usage.fetchLive = () => {
+        dispatched++;
+        return Promise.resolve({ usage: Usage.parseUtilization(Fixtures.LIVE_RESPONSE) });
+    };
+
+    const credentials = (name, oauth) =>
+        writeTemp(name, JSON.stringify({ claudeAiOauth: oauth }));
+
+    const nowMs = Date.now();
+    const expiredPath = credentials('expired-credentials.json', {
+        accessToken: 'access',
+        refreshToken: 'refresh',
+        expiresAt: nowMs - 1000,
+        refreshTokenExpiresAt: nowMs + 30 * 24 * AN_HOUR,
+    });
+    const deadPath = credentials('dead-credentials.json', {
+        accessToken: 'access',
+        refreshToken: 'refresh',
+        expiresAt: nowMs - 1000,
+        refreshTokenExpiresAt: nowMs - 1000,
+    });
+    const livePath = credentials('live-credentials.json', {
+        accessToken: 'access',
+        refreshToken: 'refresh',
+        expiresAt: nowMs + AN_HOUR,
+        refreshTokenExpiresAt: nowMs + 30 * 24 * AN_HOUR,
+    });
+
+    Usage.tokenPath = () => expiredPath;
+
+    return Usage.fetchUsage().then(result => {
+        check('async: an expired token reports expired', result.error, Usage.Err.EXPIRED);
+        check('async: ...without spending a request', dispatched, 0);
+        /* The identity has to travel on this path too — it is the one a
+         * suspended machine wakes up on. */
+        check('async: ...and the identity still travels', result.identity, 'a2:o2');
+
+        Usage.tokenPath = () => deadPath;
+        return Usage.fetchUsage();
+    }).then(result => {
+        /* The only case where telling someone to sign in again is the truth. */
+        check('async: a dead refresh token reads as not signed in',
+            result.error, Usage.Err.NO_AUTH);
+        check('async: ...also without spending a request', dispatched, 0);
+
+        Usage.tokenPath = () => livePath;
+        return Usage.fetchUsage();
+    }).then(result => {
+        check('async: a live token still reaches the API', result.source, 'live');
+        check('async: ...exactly once', dispatched, 1);
+
+        /* An absent credentials file is the ordinary signed-out state, and it
+         * must not start looking like an expired token. */
+        Usage.tokenPath = () => GLib.build_filenamev([TMP_DIR, 'no-credentials.json']);
+        return Usage.fetchUsage();
+    }).then(result => {
+        check('async: no credentials file at all reads as not signed in',
+            result.error, Usage.Err.NO_AUTH);
+        check('async: ...and sent nothing either', dispatched, 1);
+    });
+}
+
+/* The watcher is the whole mechanism of the fix, so it is asserted rather than
+ * read: that it fires at all against the rename Claude Code writes with, that
+ * the debounce holds the callback back, and that cancel() really stops it — a
+ * watcher outliving disable() would fire into a destroyed indicator.
+ *
+ * The counts are `>= 1` rather than exact on purpose. One replacement is
+ * several inotify events (the staging file appearing, then the rename onto the
+ * path), and how many survive Gio's own coalescing is a property of the kernel
+ * and glib, not of this code. Pinning it would buy a flaky suite and assert
+ * nothing we rely on. What we rely on is the two directions below: an event
+ * eventually arrives, and after cancel() none does. */
+function aWatcherSurvivesAnAtomicReplace() {
+    resetStubs();
+
+    const DEBOUNCE_MS = 400;
+    const path = writeTemp('watched.json', '{"generation":0}');
+    tmpPaths.push(`${path}.staging`);
+
+    let fired = 0;
+    const watcher = Usage._watchFile(path, () => { fired++; }, DEBOUNCE_MS);
+
+    replaceAtomically(path, '{"generation":1}');
+
+    return waitMs(DEBOUNCE_MS / 4).then(() => {
+        /* The debounce is what keeps a write burst from becoming a request
+         * burst, so it has to actually delay the callback. */
+        check('async: a write inside the debounce window has not fired yet',
+            fired, 0);
+        return waitMs(DEBOUNCE_MS * 2);
+    }).then(() => {
+        check('async: a watcher fires for a file replaced by rename',
+            fired >= 1, true);
+
+        const before = fired;
+        watcher.cancel();
+        replaceAtomically(path, '{"generation":2}');
+
+        return waitMs(DEBOUNCE_MS * 2).then(() => {
+            check('async: a cancelled watcher stops firing', fired, before);
+        });
+    });
+}
+
+/* The two watchers must point at the two different files, which is the entire
+ * substance of the bug: the one being watched could not fix the fault, and the
+ * one that could was not being watched. */
+function theWatchedPathsAreTheRightTwo() {
+    resetStubs();
+
+    check('async: the account watcher reads ~/.claude.json',
+        Usage.accountPath().endsWith('/.claude.json'), true);
+    check('async: the token watcher reads ~/.claude/.credentials.json',
+        Usage.tokenPath().endsWith('/.claude/.credentials.json'), true);
+
+    return Promise.resolve();
+}
+
 const ASYNC_CHECKS = [
     readJsonTellsAbsentFromUnreadable,
     readAccountReportsUnreadableAsUnknown,
@@ -842,6 +1106,9 @@ const ASYNC_CHECKS = [
     readAccountDisownsForeignCache,
     theFallbackRefusesAPreSwitchCache,
     aCacheOnlyReadRefusesAPreSwitchCache,
+    anExpiredTokenCostsNoRequest,
+    aWatcherSurvivesAnAtomicReplace,
+    theWatchedPathsAreTheRightTwo,
 ];
 
 /* --- report --------------------------------------------------------- */

@@ -344,6 +344,75 @@ var refreshSuperseded = function (cacheOnly, started, current) {
         : started.live !== current.live;
 };
 
+/* What the credentials file says about the token in it, without spending a
+ * request to find out:
+ *
+ *   'usable'     — send it
+ *   'expired'    — the access token is dead, but the refresh token is not, so
+ *                  Claude Code mints a new one on its next call. Nobody has to
+ *                  do anything; the panel has to wait, and be told so.
+ *   'signed-out' — there is no credential worth sending, and no way back to one
+ *                  without a person signing in.
+ *
+ * The access token lives 8 hours, so a machine that suspends overnight wakes
+ * with a dead one and the first poll after unlock used to spend a request being
+ * told what the file already said (measured 2026-08-01 11:52:38, a 401).
+ *
+ * Every expiry field is trusted only when it parses. A missing or malformed one
+ * is no information, and refusing to send a token on that basis would turn a
+ * working panel into a fault message — a far worse failure than one wasted
+ * request. So the unreadable cases all fail open.
+ *
+ * Lives here rather than in readToken so the boundary cases are assertions
+ * rather than paths only an expired login could reach. */
+var tokenState = function (oauth, nowMs) {
+    if (!oauth || typeof oauth !== 'object')
+        return 'signed-out';
+
+    const access = oauth.accessToken;
+    if (typeof access !== 'string' || !access)
+        return 'signed-out';
+
+    const expiresAt = Number(oauth.expiresAt);
+    if (!Number.isFinite(expiresAt) || expiresAt <= 0 || nowMs < expiresAt)
+        return 'usable';
+
+    const refresh = oauth.refreshToken;
+    if (typeof refresh !== 'string' || !refresh)
+        return 'signed-out';
+
+    const refreshExpiresAt = Number(oauth.refreshTokenExpiresAt);
+    const refreshDead = Number.isFinite(refreshExpiresAt) &&
+        refreshExpiresAt > 0 && nowMs >= refreshExpiresAt;
+
+    return refreshDead ? 'signed-out' : 'expired';
+};
+
+/* Whether a write to the credentials file is worth a live request.
+ *
+ * Recovery from an auth fault used to be bound to the 300s poll alone: the only
+ * file being watched was ~/.claude.json, and its callback is a cache-only read,
+ * which never contacts the API and so is structurally incapable of clearing a
+ * fault. Measured 2026-08-01: a fresh token landed on disk at 11:55:41 and the
+ * panel stayed wrong until 11:57:33 — the watcher fired three times in between
+ * and skipped all three.
+ *
+ * A new token is the one event that ends an auth fault, so it earns a request —
+ * and only then. Claude Code rotates the token every few hours whether the
+ * panel is faulted or not, and spending a request on each rotation would buy
+ * nothing the poll is not already delivering. On a throttled panel it would do
+ * active harm.
+ *
+ * A running switch ladder is excluded because it is already retrying on its own
+ * schedule and owns the status row while it does — a second request racing it
+ * would render numbers under a "Loading…" row it does not control. */
+var tokenChangeWarrantsFetch = function (displayedError, switchLadderActive) {
+    if (switchLadderActive)
+        return false;
+
+    return displayedError === Err.EXPIRED || displayedError === Err.NO_AUTH;
+};
+
 var formatAge = function (ageMs) {
     const minutes = Math.floor(ageMs / 60000);
     if (minutes < 1)
@@ -408,19 +477,28 @@ function accountPath() {
     return GLib.build_filenamev([GLib.get_home_dir(), '.claude.json']);
 }
 
-/* Claude Code rewrites ~/.claude.json whenever it refreshes its usage cache,
- * so watching the file gives a near-instant update during active use at no API
- * cost. The same file carries plenty of unrelated state that changes often,
- * hence the debounce. */
-var watchAccount = function (onChanged, debounceMs = 2000) {
+function tokenPath() {
+    return GLib.build_filenamev([
+        GLib.get_home_dir(), '.claude', '.credentials.json',
+    ]);
+}
+
+/* Debounced file watching, shared by the two watchers below.
+ *
+ * Both files are written by rename rather than in place, so the monitor has to
+ * hold the path and not the inode — Gio's does, by watching the parent
+ * directory and filtering on the name. Asserted in the suite rather than
+ * assumed, because a monitor that quietly stopped after the first replacement
+ * would look exactly like a file that never changes again. */
+var _watchFile = function (path, onChanged, debounceMs) {
     let monitor = null;
     let pendingId = 0;
 
     try {
-        monitor = Gio.File.new_for_path(accountPath())
+        monitor = Gio.File.new_for_path(path)
             .monitor_file(Gio.FileMonitorFlags.NONE, null);
     } catch (e) {
-        logError(e, 'claude-monitor: could not watch ~/.claude.json');
+        logError(e, `claude-monitor: could not watch ${path}`);
         return { cancel() {} };
     }
 
@@ -444,6 +522,23 @@ var watchAccount = function (onChanged, debounceMs = 2000) {
             monitor.cancel();
         },
     };
+};
+
+/* Claude Code rewrites ~/.claude.json whenever it refreshes its usage cache,
+ * so watching the file gives a near-instant update during active use at no API
+ * cost. The same file carries plenty of unrelated state that changes often,
+ * hence the debounce. */
+var watchAccount = function (onChanged, debounceMs = 2000) {
+    return _watchFile(accountPath(), onChanged, debounceMs);
+};
+
+/* The other file, and the other reason to watch one. This one carries no usage
+ * data at all — it is watched because a write to it is the only event that ends
+ * an auth fault, and until it was watched the panel's only way out of one was
+ * to wait for the next poll. See tokenChangeWarrantsFetch for why a write here
+ * does not always earn a request. */
+var watchToken = function (onChanged, debounceMs = 2000) {
+    return _watchFile(tokenPath(), onChanged, debounceMs);
 };
 
 /* One read of ~/.claude.json yields the signed-in email, an identity to compare
@@ -479,16 +574,23 @@ var readAccount = function () {
     });
 };
 
+/* Resolves { state, token }, where state is tokenState's verdict and token is
+ * only set when that verdict is 'usable'.
+ *
+ * An unreadable credentials file resolves 'signed-out' along with an absent
+ * one. That is deliberately unlike readAccount, which keeps the two apart:
+ * there, identity drives control flow and a torn read must decide nothing. Here
+ * the only decision is whether to send a request, and there is no token to send
+ * either way. The post-switch ladder already retries the state this produces. */
 var readToken = function () {
-    const path = GLib.build_filenamev([
-        GLib.get_home_dir(), '.claude', '.credentials.json',
-    ]);
-
-    return _readJson(path).then(data => {
+    return _readJson(tokenPath()).then(data => {
         const oauth = data && data.claudeAiOauth;
-        if (!oauth || !oauth.accessToken)
-            return null;
-        return oauth.accessToken;
+        const state = tokenState(oauth, Date.now());
+
+        return {
+            state,
+            token: state === 'usable' ? oauth.accessToken : null,
+        };
     });
 };
 
@@ -678,11 +780,16 @@ var fetchUsage = function ({
         if (!force && backoff.active(Date.now()))
             return fallback(Err.RATE_LIMITED);
 
-        return readToken().then(token => {
-            if (!token)
+        return readToken().then(credentials => {
+            /* The file already knows. Sending a token it says is dead spends a
+             * request to be told 401 — which is how a suspended machine used to
+             * greet every morning. */
+            if (credentials.state === 'expired')
+                return fallback(Err.EXPIRED);
+            if (credentials.state !== 'usable')
                 return fallback(Err.NO_AUTH);
 
-            return fetchLive(token).then(result => {
+            return fetchLive(credentials.token).then(result => {
                 if (result.error)
                     return fallback(result.error);
 

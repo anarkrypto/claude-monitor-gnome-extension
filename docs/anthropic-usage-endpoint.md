@@ -185,6 +185,45 @@ already does.
 
 ---
 
+## The token, and what it says about itself
+
+`~/.claude/.credentials.json` is the other undocumented file this extension
+reads. Measured **2026-08-01**:
+
+```sh
+python3 -c "import json,os,datetime as d;o=json.load(open(os.path.expanduser('~/.claude/.credentials.json')))['claudeAiOauth'];print({k:(d.datetime.fromtimestamp(v/1000) if k.endswith('ExpiresAt') or k=='expiresAt' else v) for k,v in o.items() if 'oken' not in k or k.endswith('ExpiresAt')})"
+```
+
+| Field | Observed |
+| --- | --- |
+| `expiresAt` | issued + **8 hours** (`11:55:41` → `19:55:41`) |
+| `refreshTokenExpiresAt` | issued + ~28 days (`2026-08-29 07:26`) |
+| `accessToken` / `refreshToken` | 108 characters each |
+
+Two consequences the extension is built around.
+
+**A suspended machine wakes up unauthenticated.** Eight hours is shorter than a
+night, so the first refresh after unlock finds a dead token — this is the fault
+most likely to be on screen at any time, not an exotic one. Reading `expiresAt`
+turns it into a local answer instead of a `401`.
+
+**The file is the recovery signal.** Claude Code's own retry path for this
+endpoint is `401 → refresh token → retry`, so it mints a new access token on its
+next call and writes it here. Observed on 2026-08-01: the panel showed *Token
+expired* from `11:52:38`; a fresh token was written at `11:55:41.549`; the panel
+was still wrong at `11:57:33`, when the 5-minute poll finally asked. Nothing in
+between could have shortened that — the only file being watched was
+`~/.claude.json`, whose watcher fires a cache-only read that never contacts the
+API. Watching this file instead closes the gap to the 2-second debounce.
+
+Both files are written by **rename**, not in place, so a monitor has to hold the
+path rather than the inode. Gio's does — it watches the parent directory and
+filters on the name — but that is asserted in the suite rather than assumed,
+because a monitor that quietly stopped after the first replacement would look
+exactly like a file that never changes again.
+
+---
+
 ## What the official docs do apply
 
 Three things from the [Messages API rate-limit
